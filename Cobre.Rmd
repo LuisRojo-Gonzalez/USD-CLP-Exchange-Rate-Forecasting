@@ -1,0 +1,484 @@
+---
+title: "Time series using volatility models"
+author:
+  - Luis Rojo-González^[Universitat Politècnica de Catalunya, luis.rojo.g@usach.cl]
+date: "May 31, 2020"
+output:
+  pdf_document:
+    fig_caption: yes
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: true  ## if you want number sections at each table header
+    highlight: tango  # specifies the syntax highlighting style
+  header-includes:
+  - \usepackage{float}
+  - \usepackage{amsmath}
+  - \usepackage[spanish]{babel}
+  - \usepackage[utf8]{inputenc}
+  - \usepackage{natbib}
+  - \usepackage{booktabs}
+  html_document:
+    df_print: paged
+params:
+  seed: 12345
+---
+
+```{r echo = FALSE}
+# Working directory
+setwd("~/Desktop/UPC/FinancialStatistic/Project")
+```
+
+```{r message = FALSE, warning = FALSE}
+### Libraries
+library(tseries)
+library(ggplot2)
+library(car)
+library(urca)
+library(forecast)
+library(fGarch)
+library(xts)
+library(dplyr)
+library(readxl)
+library(zoo)
+library(lubridate)
+library(xtable)
+library(ggpubr)
+```
+
+```{r message=FALSE, warning=FALSE}
+# --------- Data loading -------
+cobre = read_excel("Cobre.xlsx")
+cobre$Dia = as.Date(as.POSIXct(strptime(cobre$Dia, "%Y-%m-%d")))
+Time = data.frame(Dia = seq(from = as.Date("2015-01-01"),
+              to = as.Date("2020-04-21"),
+              by = 1))
+cobre = full_join(Time, cobre)
+cobre = cobre %>% filter(Dia <= as.Date("2018-12-31"))
+summary(cobre)
+```
+
+\section{Time series analysis} \label{sec:tsanalysis}
+
+\subsection{Time series descriptive analysis} \label{subsec:tsdescription}
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:ts}Time serie CLP/USD stock exchange.", message=FALSE, warning=FALSE}
+# Si hubiese datos non-available, o los sustituimos por la observacion anterior
+# aqui es asi pues el valor del viernes se mantiene por el sabado y domingo
+cobre = na.locf(cobre, fromLast = FALSE)
+
+Time = data.frame(Dia = seq(from = as.Date("2015-01-01"),
+              to = as.Date("2018-12-31"),
+              by = 1))
+
+cobre.ts = zoo(cobre$Precio, Time$Dia)
+
+exogenous = tibble(date = c(as.Date("2017-11-19"),
+                            as.Date("2017-12-17"),
+                            as.Date("2015-03-25"),
+                            as.Date("2015-09-16"),
+                            as.Date("2015-11-13"),
+                            as.Date("2016-04-29"),
+                            as.Date("2016-12-25"),
+                            as.Date("2016-07-24"),
+                            as.Date("2018-03-11"),
+                            as.Date("2018-04-09")),
+                   fact = c("Presidential election (1st leg)",
+                            "Presidential election (2nd leg)",
+                            "Natural disaster in the north",
+                            "Earthquake",
+                            "Paris under attack",
+                            "Red tide in Chiloe",
+                            "Earthquake",
+                            "No+AFP",
+                            "Piñera as president",
+                            "Latin American Wings (SA) suspension"))
+
+# Grafico de las series temporales
+ggplot() +
+  geom_line(data = cobre, aes(x = Dia, y = Precio,
+                              colour = year(Dia)), alpha = 0.5) +
+  theme_bw() + xlab("") +
+  theme(plot.title = element_text(hjust = 0.5),
+        text=element_text(size = 16),
+        legend.position = "none") +
+  geom_vline(data = exogenous,
+             aes(xintercept = date),
+             linetype = 4) +
+  geom_text(data = exogenous,
+            aes(x = date,
+                y = 250,
+                label = fact), angle = 90, vjust = -0.5)
+```
+
+Figure \ref{fig:ts} shows that there is not a clear deterministic linear trend, on the other hand the stochastic trend is not present due to the constant variance is not satisfied. Thus, the time series seems not to be stationary.
+
+\subsection{Stationarity and unit roots analysis} \label{subsec:tsstationarity}
+
+Figure \ref{fig:boxmeanvar} shows, there are differences on the variance of the series, so it is conveniently to apply the logarithm to stabilize it.
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:boxmeanvar}Boxplot and mean-variance plot for anually data.", message=FALSE, warning=FALSE}
+p1 = cobre %>% ggplot(aes(x = as.factor(year(Dia)), y = Precio)) +
+  geom_boxplot() + xlab("") + ylab("Copper") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        text = element_text(size = 16),
+        legend.position = "none")
+
+# media y varianza anual
+p2 = ggplot(data = tibble(Mean = tapply(cobre$Precio,
+                                        as.factor(year(cobre$Dia)), mean),
+                          Variance = tapply(cobre$Precio,
+                                            as.factor(year(cobre$Dia)), var)),
+                     aes(x = Mean, y = Variance)) +
+  geom_point() + geom_smooth(method = "lm", se = FALSE) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        text=element_text(size = 16),
+        legend.position = "none")
+
+ggarrange(p1, p2, labels = "AUTO")
+```
+
+On the other hand, as Figure \ref{fig:monthplot} shows, there is not a seasonal component as we expected.
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:monthplot}Monthplot.", message=FALSE, warning=FALSE}
+##Plot de medias-varianzas
+monthplot(cobre.ts, ylab = "Value", xlab = "")
+```
+
+```{r}
+lncobre = log(cobre.ts)
+d1lncobre = diff(lncobre)[-1]
+```
+
+Applying the logarithm and one and two differentiation to explore the stationarity of the series we get the P/ACF plots shown in Figure \ref{fig:diff}, where all of them has short variances, but the series with only one differentiation looks like the best one. Also, we have to note that there is an important possible outlier.
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:diff}Differentiated time series plot.", message=FALSE, warning=FALSE}
+par(mfrow = c(2, 2))
+plot(lncobre, main = paste("Variance =", round(var(lncobre), 4)),
+     xlab = "")
+abline(h = 0)
+
+plot(d1lncobre, main = paste("Variance =", round(var(d1lncobre), 4)),
+     xlab = "")
+abline(h = 0)
+
+## Diferenciaci?n regular (media no constante)
+d1d1lncobre = diff(d1lncobre, 1)
+plot(d1d1lncobre, main = paste("Variance =", round(var(d1d1lncobre), 4)),
+     xlab = "")
+abline(h = 0)
+
+## Nueva diferenciaci?n regular (posible no estacionariedad)
+d1d1d1lncobre = diff(d1d1lncobre,1)
+plot(d1d1d1lncobre, main = paste("Variance =", round(var(d1d1d1lncobre), 4)),
+     xlab = "")
+abline(h = 0)
+
+# var(lndolar)
+# var(d1lndolar) # nos quedamos con esta log-returns
+# var(d1d1lndolar)
+# var(d1d1d1lndolar)
+```
+
+The comparison of the P/ACF plots for both the time series and the differentiated log-time series, respectively, confirm the presence of a unit root at first glance such as Figure \ref{fig:acf} shows. Also, Table 
+
+Also, such as Figure \ref{fig:acf} shows, it is clearly to see that ACF plot not decay quickly but PACF does, therefore we can claim that it is not a stationary time series. Finally, Ljung-Box test gives us the support to say that ACF time-lag are not jointly zero.
+
+```{r, fig.width = 10, fig.height = 8, fig.cap = "\\label{fig:acf}ACF and PACF plots for original time series and differentiated log-time series.", message=FALSE, warning=FALSE}
+#########################################
+#An?lisis de estacionariedad de la serie#
+#########################################
+
+# -------- Pruebas informales: gr?fico de la serie, fac, facp y Ljung-Box test ------
+par(mfrow = c(2, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# time series
+acf(lncobre, ylim = c(-1, 1), col = c(2, rep(1, 11)), lwd = 2, lag.max = 72)
+pacf(lncobre, ylim = c(-1, 1), col = c(2, rep(1, 11)), lwd = 2, lag.max = 72)
+
+# differentiated log-time series
+acf(d1lncobre, ylim = c(-1, 1), col = c(2, rep(1, 11)), lwd = 2, lag.max = 72)
+pacf(d1lncobre, ylim = c(-1, 1), col = c(rep(1, 11), 2), lwd = 2, lag.max = 72)
+```
+
+This can be see in Table \ref{tab:lbt1} also, where the Ljung-box test is performed for the same series as above\footnote{Keep in mind that d1ln notation represents differentiation and logarithm transformation.}. This test gives us some clues towards the differentiated log-time series would be stationary.
+
+```{r results = 'asis'}
+box.pvalue = tibble(lag = 4+4*c(0:4))
+for (i in 1:nrow(box.pvalue)) {
+  box.pvalue[i, 2] = Box.test(lncobre, lag = box.pvalue$lag[i],
+                              type = c("Ljung-Box"))$statistic
+  box.pvalue[i, 3] = Box.test(lncobre, lag = box.pvalue$lag[i],
+                              type = c("Ljung-Box"))$p.value
+  box.pvalue[i, 4] = Box.test(d1lncobre, lag = box.pvalue$lag[i],
+                              type = c("Ljung-Box"))$statistic
+  box.pvalue[i, 5] = Box.test(d1lncobre, lag = box.pvalue$lag[i],
+                              type = c("Ljung-Box"))$p.value
+}
+colnames(box.pvalue) = c("Lag", "Statistic (original)", "Ljung-Box p.value (original)", "Statistic (d1ln)", "Ljung-Box p.value (d1ln)")
+
+print(xtable(box.pvalue,
+             digits = 2, label = "tab:lbt1",
+             caption = "Ljung-Box test results for original and differentiated log-time series."),
+             caption.placement = "top", comment = FALSE, include.rownames = FALSE)
+```
+
+The formal test to proove stationarity are given by Dickey-Fuller test, where we have a p-value of 0.0379 for the first using BIC and a p.value of 0.03792 using AIC, thus this time series seems to be stationary. Also, test's residual plot shown in Figure \ref{fig:dfresiduals}.
+
+The null hypothesis is the series has an unit root. then with a p-value equal to 0.4391 we do not reject this.
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:dfresiduals}Dickey-Fuller test's residual plot.", message=FALSE, warning=FALSE}
+####################################################
+#pruebas formales (contrastes de ra?ces unitarias) #
+####################################################
+
+# par(mfrow = c(2, 1), font = 2, font.lab = 4, font.axis = 2, las = 1)
+#series de precios
+cobre.df = ur.df(lncobre, type = c("none"), selectlags = c("BIC")) 
+# summary(dolar.df)
+# plot(dolar.df)
+
+cobre.df = ur.df(lncobre, type = c("none"), selectlags = c("AIC"))
+summary(cobre.df)
+plot(cobre.df)
+```
+
+Now, we can clearly see that the test is rejected so we can claim the time series is integrated of order 1.
+
+```{r, fig.width = 10, fig.asp = 0.5, message=FALSE, warning=FALSE}
+#series de precios
+cobre.pp = ur.pp(lncobre, type = c("Z-tau"), model = c("constant"), lags = c("short"))
+summary(cobre.pp)
+
+cobre.pp = ur.pp(lncobre, type = c("Z-tau"), model = c("constant"), lags = c("long"))
+summary(cobre.pp)
+
+#series de rendimientos
+
+# cobre.pp = ur.pp(d1lncobre, type = c("Z-tau"), model = c("constant"), lags = c("short"))
+# summary(cobre.pp)
+# 
+# cobre.pp = ur.pp(d1lncobre, type = c("Z-tau"), model = c("constant"), lags = c("long"))
+# summary(cobre.pp)
+```
+
+The KPSS unit root test give us statistics without the rejected region, so the null hypothesis is not rejected; then, the time series has unit roots.
+
+```{r}
+#series de precios
+
+cobre.kpss = ur.kpss(cobre.ts, type = c("mu"), lags = c("short"))
+summary(cobre.kpss)
+
+cobre.kpss = ur.kpss(cobre.ts, type = c("mu"), lags = c("long"))
+summary(cobre.kpss)
+
+# #series de rendimientos
+# cobre.kpss = ur.kpss(d1lncobre, type = c("mu"), lags = c("short"))
+# summary(cobre.kpss)
+# 
+# cobre.kpss = ur.kpss(d1lncobre, type = c("mu"), lags = c("long"))
+# summary(cobre.kpss)
+```
+
+Some basic descriptive statistics show us the time series we are working with is not normal and leptokurtic distribution (see Table \ref{tab:res1}) which is supported by the Jarque-bera test, also such as Figure \ref{fig:normplot1} shows we can recognize there is an important influent outlier in the time series.
+
+```{r results = 'asis'}
+#Estad?sticos b?sicos de las series
+res = tibble(Min = min(d1lncobre), Q1 = quantile(d1lncobre, probs = 0.25),
+             Mean = mean(d1lncobre), Median = median(d1lncobre),
+             Q3 = quantile(d1lncobre, probs = 0.75), Sd = sd(d1lncobre),
+             Skewnesss = skewness(d1lncobre), Kurtosis = kurtosis(d1lncobre))
+
+print(xtable(res,
+             digits = 2, label = "tab:res1",
+             caption = "Descriptive statistics of the differentiated log-time series."),
+             caption.placement = "top", comment = FALSE, include.rownames = FALSE)
+
+normalTest(d1lncobre, method = "jb")
+```
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:normplot1}Histogram and QQ-plot for normality assessment.", message=FALSE, warning=FALSE}
+# Histogram of returns with normal curve
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+hist(d1lncobre, breaks = 20, freq = F, main = 'Differentiated log-time series histogram')
+curve(dnorm(x, mean = mean(d1lncobre), sd = sd(d1lncobre)), col = 2, add = T)
+qqnorm(d1lncobre)
+qqline(d1lncobre, datax = FALSE)
+```
+
+\section{Identification, estimation and diagnosis a model for the mean} \label{sec:modeling}
+
+\subsection{Stage 1: Model identification} \label{subsec:stage1}
+
+As we see in Section \ref{subsec:tsstationarity}, in particual in Figure \ref{fig:boxmeanvar}, there are differences on the variance so the logarithm must be applied, then one stationary difference was applied to find that stationary time series which we will work with, and also an important thing to recall is there is not a seasonal pattern in this time series.
+
+To help the decision making we take into account the test performed above as well as P/ACF plots (see Figure \ref{fig:acf}) which show, at first glance, there are not any stationary model (ARMA), but a random walk such as we see above since the time series has a unit root. Nevertheless, we try to fit simple models ARIMA(1, 1, 0), ARIMA(0, 1, 1) and ARIMA(1, 1, 1).
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:acf2}ACF and PACF plots for differentiated log-time series.", message=FALSE, warning=FALSE}
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# differentiated log-time series
+acf(d1lncobre, ylim = c(-1, 1), col = c(2, rep(1, 11)), lwd = 2, lag.max = 72)
+pacf(d1lncobre, ylim = c(-1, 1), col = c(rep(1, 11), 2), lwd = 2, lag.max = 72)
+```
+
+\subsection{Stage 2: Model estimation} \label{subsec:stage2}
+
+The first model is the ARIMA(1, 1, 0). This model does not look good in term of the significance of their parameters.
+
+```{r}
+# ARIMA(1, 1, 0)
+(model1 = auto.arima(d1lncobre, ic = "aic"))
+# (model1 = arima(d1lncobre, order = c(8, 0, 0), include.mean = FALSE))
+pnorm(c(abs(model1$coef)/sqrt(diag(model1$var.coef))),
+      mean = 0, sd = 1, lower.tail = FALSE)
+```
+
+The second model is the ARIMA(0, 1, 1). This model looks good in term of the significance of their parameters and achieves a bit better performance related to AIC and log-likelihood.
+
+```{r}
+# MA(1)
+(model2 = arima(d1lncobre, order = c(0, 0, 1), include.mean = FALSE))
+pnorm(c(abs(model2$coef)/sqrt(diag(model2$var.coef))),
+      mean = 0, sd = 1, lower.tail = FALSE)
+```
+
+Although we recognized two possible models, now we try to fit an ARMA(1, 1) model to annihilate doubts of other model existence. This model does not fit well because their parameters are not significative.
+
+```{r}
+# ARIMA(1, 1, 1)
+(model3 = arima(d1lncobre, order = c(1, 0, 1), include.mean = FALSE))
+pnorm(c(abs(model3$coef)/sqrt(diag(model3$var.coef))),
+      mean = 0, sd = 1, lower.tail = FALSE)
+```
+
+Till now, we saw there are not suitable models that fill well the d1ln-time series. Thus, we fit the log-time series to their respectively ARIMA model to deal with the found unit root as a random walk, and see there is a log-likelihood and AIC improvements.
+
+```{r}
+# ARIMA(0, 1, 0): random walk
+(model4 = arima(lncobre, order = c(0, 1, 0), include.mean = FALSE))
+pnorm(c(abs(model4$coef)/sqrt(diag(model4$var.coef))),
+      mean = 0, sd = 1, lower.tail = FALSE)
+```
+
+Finally, our model to work with is a random walk defined by $x_t = x_{t-1} + z(t)$, where $x$ represent the data at time $t$ and $z_t \sim WN(0,1)$ (is white noise, to prove).
+
+\subsection{Stage 3: Model validation} \label{subsec:stage3}
+
+The first part of the validation is related to the P/ACF plots such as Figure \ref{fig:val1} shows, we can see the P/ACF looks well at a long number of lags.
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:val1}Unit roots and Partial/Autocorrelation plots.", message=FALSE, warning=FALSE}
+# source('Validation.R')
+# dades = d1lndolar
+# model = model5
+# validation(model, dades)
+
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# ------------ Estacionariedad del modelo ----------
+# todas las ra?ces del polinomio caracter?stico deben caer fuera del c?rculo unitario
+# Produces a plot of the inverse AR and MA roots of an ARIMA model
+# plot(model5) #Produces a plot of the INVERSE AR and MA roots of an ARIMA model
+acf(model4$residuals, ylim = c(-1, 1), col = c(2, rep(1, 11)), lwd = 2, lag.max = 72)
+pacf(model4$residuals, ylim = c(-1, 1), col = c(2, rep(1, 11)), lwd = 2, lag.max = 72)
+```
+
+To confirm the above, the model expressed in terms of AR($\inf$) and MA($\inf$) give us the $\psi$ and $\pi$ weights which, such as Table \ref{tab:weight} shows, are lower than the unit and the roots of the model is larger than the unit, so there is not invertibility problems.
+
+```{r results = 'asis'}
+# poner table o grafico con pesos psi y pi
+
+#Stationary and Invertible
+  cat("\nModul of AR Characteristic polynomial Roots: ", 
+      Mod(polyroot(c(1,-model4$model$phi))),"\n")
+  cat("\nModul of MA Characteristic polynomial Roots: ",
+      Mod(polyroot(c(1,model4$model$theta))),"\n")
+
+# Model expressed as an MA infinity (psi-weights)
+  psis = ARMAtoMA(ar = model4$model$phi, ma = model4$model$theta, lag.max = 36)
+  # names(psis) = paste("psi", 1:36)
+  # cat("\nPsi-weights (MA(inf))\n")
+  # cat("\n--------------------\n")
+  # print(psis[1:10])
+  
+#Model expressed as an AR infinity (pi-weights)
+  pis = -ARMAtoMA(ar = -model4$model$theta, ma = -model4$model$phi, lag.max = 36)
+  # names(pis) = paste("pi", 1:36)
+  # cat("\nPi-weights (AR(inf))\n")
+  # cat("\n--------------------\n")
+  # print(pis[1:10])
+
+print(xtable(t(tibble(Psi = psis[1:10], Pi = pis[1:10])),
+             digits = 5, label = "tab:weight",
+             caption = "Weight of the model as AR and MA infinity."),
+             caption.placement = "top", comment = FALSE, include.rownames = TRUE)
+```
+
+Then, we can clearly identify the presence of an influent outlier in standardized residuals plot as well as the errors are jointly independently at any lag such as Figure \ref{fig:val2} shows.
+
+```{r, fig.width = 10, fig.height = 10, fig.cap = "\\label{fig:val2}Standardized residual and Ljung-Box test p-values.", message=FALSE, warning=FALSE}
+# An?lisis de los residuos
+tsdiag(model4) #dibuja los residuos estandarizados, la ACF de los residuos y los pvalues del Ljung-Box test
+```
+
+Figure \ref{fig:val3} shows the residual histogram and QQ-plot where we can clearly see the non-normality of the errors, which means the error terms in proposed model is not white noise.
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:val3}Normality plot for residuals.", message=FALSE, warning=FALSE}
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+qqnorm(model4$residuals)
+qqline(model4$residuals, datax = FALSE)
+
+plot(model4$residuals)
+title(main = "Residual plot")
+# normalTest(model5$residuals, method = "jb") #o jarque.bera.test(model$residuals)
+```
+
+The stability assessment of the models is performed using the observations corresponding to the last year of the time series, it means the whole 2018. We see that fitted model has similar estimated coefficients, both significatives, but an important increase on the AIC and log-likelihood are given when we consider the entire time series which indicate this model is not stable even when their estimated coefficient not differ a lot.
+
+```{r}
+########### Estabilitat Model (SENSE CONSTANT!!!!) ###############
+date = max(year(cobre$Dia)) - 1
+# serie completa
+serie1 = cobre %>% dplyr::select("Precio")
+# serie hasta el penultimo año
+serie2 = cobre %>% filter(year(Dia) <= date) %>% dplyr::select("Precio")
+(mod = arima(log(serie1), order = c(0, 1, 0)))
+(mod2 = arima(log(serie2), order = c(0, 1, 0)))
+```
+
+Nevertheless, for illustration purposes we perform a forecasting using the partial time series (that once without the last year data) which produces the values and confidence intervals shown in Figure \ref{fig:ts1}. It is obviously the forecasting is bad given the identified problems with the estimated model for the mean.
+
+```{r}
+# predigo con el modelo que no incluye el ultimo año
+pred = predict(mod2, n.ahead = nrow(serie1) - nrow(serie2))
+
+# horizon = data.frame(Dia = seq(from = as.Date("2015-01-01"),
+#               to = as.Date("2019-12-31"),
+#               by = 1))
+
+horizon = seq(from = as.Date("2019-01-01"),
+              to = as.Date("2019-12-31"),
+              by = 1)
+Forecast = zoo(exp(pred$pred), horizon)
+Lb = zoo(exp(pred$pred - as.vector(1.96*pred$se)), horizon)
+Ub = zoo(exp(pred$pred + as.vector(1.96*pred$se)), horizon)
+```
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:ts1}Time serie CLP/USD stock exchange with prediction overlapped plus confidence intervals for the last 12 observations.", message=FALSE, warning=FALSE}
+ggplot() + geom_line(data = cobre, aes(x = Dia, y = Precio,
+                                       colour = year(Dia)), alpha = 0.5) +
+  geom_line(aes(x = horizon, y = Forecast)) +
+  geom_line(aes(x = horizon, y = Lb), col = "red") +
+  geom_line(aes(x = horizon, y = Ub), col = "red") +
+  # geom_line(aes(x = cobre$Dia, y = rnorm(length(cobre)) + lag(cobre$Precio)), col = "green") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        text=element_text(size = 16),
+        legend.position = "none")
+```
+
+```{r}
+
+```
+
+
+\subsection{Outlier and calendar effect treatment}

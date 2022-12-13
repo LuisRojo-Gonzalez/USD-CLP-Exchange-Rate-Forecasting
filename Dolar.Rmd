@@ -1,0 +1,1271 @@
+---
+title: "CLP/USD stock exchange analysis via volatility models"
+author:
+  - Luis Rojo-González^[Universitat Politècnica de Catalunya, luis.rojo.g@usach.cl]
+date: "May 31, 2020"
+output:
+  pdf_document:
+    fig_caption: yes
+    toc: false # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: true  ## if you want number sections at each table header
+    highlight: tango  # specifies the syntax highlighting style
+  header-includes:
+  - \usepackage{float}
+  - \usepackage{amsmath}
+  - \usepackage[spanish]{babel}
+  - \usepackage[utf8]{inputenc}
+  - \usepackage{natbib}
+  - \usepackage{booktabs}
+  - \usepackage{hyperref}
+  html_document:
+    df_print: paged
+params:
+  seed: 12345
+abstract: "In this work we use CLP/USD stock exchange time series using a MA(1)-eGARCH(1, 1) t-student distributed model to get the volatility this series involves between 2015 and 2018. We check which kind of news have grater impact on them and how volatility behaves for last 30 days of observed time and for next 100 days through simulation showing it decreases at the begining of 2019. MA(1)-eGARCH t-distributed model Value-at-Risk corresponds to 2.15 at 28-12-2018, but EWMA and smoothing moving average (SMA) show the country would have more money tied up than necessary at 95% and 99% of confidence. CLP/USD seems to be very sensitive to market shocks and also be correlated to the value of a pound of Copper in Chile; relationship analyzed via DCC multivariate model showing the impact on past shocks do not affect to the correlation, but the correlation is really persistence; meanwhile news impact correlation surface increase when there are equal shocks in terms of direction (i.e. sign) in both series and decrease otherwise."
+---
+
+```{r include = FALSE}
+knitr::opts_chunk$set(echo=FALSE)
+```
+
+```{r echo = FALSE}
+# Working directory
+setwd("~/Desktop/UPC/FinancialStatistic/Project")
+```
+
+```{r message = FALSE, warning = FALSE}
+### Libraries
+library(tseries)
+library(ggplot2)
+library(car)
+library(urca)
+library(forecast)
+library(fGarch)
+library(rugarch)
+library(xts)
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(zoo)
+library(lubridate)
+library(xtable)
+library(ggpubr)
+library(fracdiff)
+library(fTrading) #EWMA
+library(xts)
+library(sarima)
+library(rmgarch)
+```
+
+```{r message=FALSE, warning=FALSE}
+# --------- Data loading -------
+serie1 = read_excel("Dolar/ID_SERIE2.xls", skip = 1) # 2015
+serie2 = read_excel("Dolar/ID_SERIE3.xls", skip = 1) # 2016
+serie3 = read_excel("Dolar/ID_SERIE4.xls", skip = 1) # 2017
+serie4 = read_excel("Dolar/ID_SERIE5.xls", skip = 1) # 2018
+# serie5 = read_excel("Dolar/ID_SERIE6.xls", skip = 1) # 2019
+# serie6 = read_excel("Dolar/ID_SERIE7.xls", skip = 1) # 2020
+dolar = rbind(serie1, serie2, serie3, serie4)
+rm(serie1, serie2, serie3, serie4, serie5, serie6)
+dolar$Dia = as.Date(as.POSIXct(strptime(dolar$Dia, "%Y-%m-%d")))
+```
+
+\section{Introduction} \label{sec:intro}
+
+The stock exchange of Chilean peso (CLP) and American dollar (USD) is an interesting time series to analyze due to its importance in the country. In fact, it is well known that it has a close relationship with the value of a pound of copper in the same country. On this way, we work with daily records for both series which are reported by the Central Bank and Chilean Copper commission (COCHILCO), both official institutions of the country. The interest on these time series are mainly two: i) both time series are inverse correlated, i.e. when one increase the other decrease its value and viceversa; and the most important ii) Chilean budget is based on the value of a pound of copper, which also depends on Chinese growing economy due to they are the most bigger customer in this market.\footnote{You can find the code in \url{https://drive.google.com/drive/folders/17fsWRZfxkqH1C_vjn29ZKz-3GtC0HHRN?usp=sharing}}
+
+This work is organized as follows: in Section \ref{sec:tsdescription} we analyze the time series looking for unit root presence as well as testing if the log-return series is stationary and also an analysis of the (Partial)Auto-Correlation Function plots are performed to recognize suitable models for the mean, based on the above analysis, Section \ref{sec:modelmean} shows how we can identify, estimate and diagnose such a model for the mean of the lof-returns carried out some informal tests as Ljung-Box or graphically (P)ACF plots as well as formal test as Dickey-Fuller (DF), Phillips-Perron (PP) and Kwiatkowski-Phillips-Schmidt-Shin (KPSS) to prove wheter the time series has unit root or is stationary, also we check if those estimated models are stables dropping out the last 30 days of the series and select the model, if any; once we get the model for the mean (or models) in Section \ref{sec:modelvar} we will looking for a model for the variance under the same schema as for the mean, but analyzing the (P)ACF squared residuals plots; Section \ref{sec:volanalysis} handles with model selection analyzing volatility and news impact plots to get forecasting as accuracy as possible, we use Exponential Weighted Moving Average (EWMA) process and historical volatility by Smoothing Moving Average (SMA) where the aim is analyze the Value-at-Risk (VaR); once we see those obtained results, Section \ref{sec:multivariant} shows a DCC multivariate volatility model using the value of a pound of copper in Chile looking for the estimated correlation and how the news impact surface is; finally, Section \ref{sec:conclusion} gives some important conclusions and remarks about the obtained results taking into some prior information about the analyzed time series.
+
+\section{Time series description} \label{sec:tsdescription}
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:ts}Time serie CLP/USD stock exchange.", message=FALSE, warning=FALSE}
+# time series format transformation
+# en mi serie de tiempo deberian haber 1457 dias
+horizon = seq(from = as.Date("2015-01-02"),
+              to = as.Date("2018-12-27"),
+              by = 1)
+dolar.ts = left_join(data.frame(Dia = horizon), dolar, by = c("Dia"))
+colnames(dolar.ts) = c("Dia", "Valor")
+# Trading = ifelse(is.na(dolar.ts$Valor), 1, 0)
+# values for non-trading days take the past values, e.g.
+# value at saturday corresponds to friday's
+dolar.ts = na.locf(dolar.ts, fromLast = FALSE)
+dolar.ts = xts(dolar.ts$Valor, dolar.ts$Dia)
+colnames(dolar.ts) = c("Valor")
+
+exogenous = tibble(date = c(as.Date("2017-11-19"),
+                            as.Date("2017-12-17"),
+                            as.Date("2015-03-25"),
+                            as.Date("2015-09-16"),
+                            as.Date("2015-11-13"),
+                            as.Date("2016-04-29"),
+                            as.Date("2016-12-25"),
+                            as.Date("2016-07-24"),
+                            as.Date("2018-03-11"),
+                            as.Date("2018-04-09")),
+                   fact = c("Presidential election (1st leg)",
+                            "Presidential election (2nd leg)",
+                            "Natural disaster in the north",
+                            "Earthquake",
+                            "Paris under attack",
+                            "Red tide in Chiloe",
+                            "Earthquake",
+                            "No+AFP",
+                            "Piñera as president",
+                            "Latin American Wings (SA) suspension"))
+
+# Grafico de la series temporale
+ggplot() +
+  geom_line(data = dolar.ts,
+            aes(x = horizon, y = Valor), alpha = 0.5) +
+  theme_bw() + xlab("") +
+  theme(plot.title = element_text(hjust = 0.5),
+        text=element_text(size = 16),
+        legend.position = "none",
+        legend.text = element_text(size = 16)) +
+  geom_vline(data = exogenous,
+             aes(xintercept = date),
+             linetype = 4) +
+  geom_text(data = exogenous,
+            aes(x = date,
+                y = 680,
+                label = fact), angle = 90, vjust = -0.5)
+```
+
+As Figure \ref{fig:ts} shows, the CLP/USD times series seems to have a random behaviour throughout time, but such as we can see there are few key events we can consider related to that market. Also, it is important to remark that for last year in considered time window there are a clear increasing trend, but this is not the common throughout time. In summary, there is not a deterministic linear trend and stochastic trend is not present due to the constant variance is not satisfied. Thus, the time series seems not to be stationary.
+
+\subsection{Stationarity and unit roots analysis} \label{subsec:stationarity}
+
+Figure \ref{fig:boxmeanvar} shows there are differences on the variance of the series (see y-axis of \textbf{B}), so it is conveniently to apply the logarithm to stabilize it.
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:boxmeanvar}Boxplot and mean-variance plot for anually data.", message=FALSE, warning=FALSE}
+p1 = dolar.ts %>% ggplot(aes(x = as.factor(year(horizon)), y = Valor)) +
+  geom_boxplot() + xlab("") + ylab("CLP/USD") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        text = element_text(size = 16),
+        legend.position = "none")
+
+# media y varianza anual
+p2 = ggplot(data = tibble(Mean = tapply(dolar.ts$Valor,
+                                        as.factor(year(horizon)), mean),
+                          Variance = tapply(dolar.ts$Valor,
+                                            as.factor(year(horizon)), var)),
+                     aes(x = Mean, y = Variance)) +
+  geom_point() + geom_smooth(method = "lm", se = FALSE) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        text=element_text(size = 16),
+        legend.position = "none")
+
+ggarrange(p1, p2, labels = "AUTO")
+```
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:monthplot}Monthplot.", message=FALSE, warning=FALSE}
+# On the other hand, as Figure \ref{fig:monthplot} shows, there is not a seasonal component as we expected.
+##Plot de medias-varianzas
+# monthplot(dolar.ts, ylab = "Value", xlab = "",
+#           label = c("Jan", "Feb", "Mar", "Apr",
+#                     "May", "June", "July", "Aug",
+#                     "Sept", "Oct", "Nov", "Dec"))
+```
+
+```{r}
+# log series
+lndolar = log(dolar.ts)
+# differentiated log series
+d1lndolar = diff(lndolar)[-1]
+# second differentiated log series
+d1d1lndolar = diff(d1lndolar, 1)[-1]
+# third differentiated log series
+d1d1d1lndolar = diff(d1d1lndolar, 1)[-1]
+```
+
+Applying the logarithm and one to three differentiations to explore the stationarity of the series we get the (Partial)Auto-Correlation Function plots shown in Figure \ref{fig:diff}, where all of them has short variances, but the series with only one differentiation looks like the best one. Also, we have to note that there are a couple of outliers.
+
+```{r, fig.width = 10, fig.height = 7, fig.cap = "\\label{fig:diff}Differentiated time series plot.", message=FALSE, warning=FALSE}
+par(mfrow = c(2, 2))
+
+plot(x = horizon, y = lndolar, main = paste("Variance =", round(var(lndolar), 5)),
+     xlab = "", type = "l")
+abline(h = 0, col = "red")
+
+plot(x = horizon[-1], y = d1lndolar, main = paste("Variance =", round(var(d1lndolar), 5)),
+     xlab = "", type = "l")
+abline(h = 0, col = "red")
+
+plot(x = horizon[-1][-1], y = d1d1lndolar, main = paste("Variance =", round(var(d1d1lndolar), 5)),
+     xlab = "", type = "l")
+abline(h = 0, col = "red")
+
+plot(x = horizon[-1][-1][-1], y = d1d1d1lndolar, main = paste("Variance =", round(var(d1d1d1lndolar), 5)),
+     xlab = "", type = "l")
+abline(h = 0, col = "red")
+
+# var(lndolar)
+# var(d1lndolar) # nos quedamos con esta log-returns
+# var(d1d1lndolar)
+# var(d1d1d1lndolar)
+```
+
+The (Partial)Auto-Correlation function plots for these series seem to indicate the first differentiation would be enough to work with in terms of stationarity such as Figure \ref{fig:acf} shows. Nonetheless, this conclusion at first glance might be wrong, so we perform a Ljung-Box test as a more formal tool to see whether the time series has a unit root (null hypothesis) or are stationary (alternative hypothesis).
+
+```{r, fig.width = 10, fig.height = 12, fig.cap = "\\label{fig:acf}ACF and PACF plots for original time series and differentiated log-time series.", message=FALSE, warning=FALSE}
+#########################################
+#Analisis de estacionariedad de la serie#
+#########################################
+
+# -------- Pruebas informales: gr?fico de la serie, fac, facp y Ljung-Box test ------
+par(mfrow = c(4, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# time series
+acf(lndolar, ylim = c(-1, 1), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, xlim = c(2, 40))
+pacf(lndolar, ylim = c(-1, 1), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, xlim = c(2, 40))
+
+# differentiated log-time series
+acf(d1lndolar, ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, xlim = c(2, 40))
+pacf(d1lndolar, ylim = c(-0.25, 0.25), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, xlim = c(2, 40))
+
+# second differentiated log-time series
+acf(d1d1lndolar, ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, xlim = c(2, 40))
+pacf(d1d1lndolar, ylim = c(-0.25, 0.25), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, xlim = c(2, 40))
+
+# third differentiated log-time series
+acf(d1d1d1lndolar, ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, xlim = c(2, 40))
+pacf(d1d1d1lndolar, ylim = c(-0.25, 0.25), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, xlim = c(2, 40))
+```
+
+Obtained results for Ljung-Box test (their p-values) are in Table \ref{tab:lbt1} where we can see all of time series (original and differentiated ones) would be jointly independent, which is a good property towards models chosen\footnote{Keep in mind that d1ln notation represents differentiation and logarithm transformation.}.
+
+```{r results = 'asis'}
+box.pvalue = tibble(lag = 4+4*c(0:4))
+for (i in 1:nrow(box.pvalue)) {
+  # box.pvalue[i, 2] = Box.test(lndolar, lag = box.pvalue$lag[i],
+  #                             type = c("Ljung-Box"))$statistic
+  box.pvalue[i, 2] = Box.test(lndolar, lag = box.pvalue$lag[i],
+                              type = c("Ljung-Box"))$p.value
+  # box.pvalue[i, 4] = Box.test(d1lndolar, lag = box.pvalue$lag[i],
+  #                             type = c("Ljung-Box"))$statistic
+  box.pvalue[i, 3] = Box.test(d1lndolar, lag = box.pvalue$lag[i],
+                              type = c("Ljung-Box"))$p.value
+  # box.pvalue[i, 6] = Box.test(d1d1lndolar, lag = box.pvalue$lag[i],
+  #                             type = c("Ljung-Box"))$statistic
+  box.pvalue[i, 4] = Box.test(d1d1lndolar, lag = box.pvalue$lag[i],
+                              type = c("Ljung-Box"))$p.value
+  # box.pvalue[i, 8] = Box.test(d1d1lndolar, lag = box.pvalue$lag[i],
+  #                             type = c("Ljung-Box"))$statistic
+  box.pvalue[i, 5] = Box.test(d1d1d1lndolar, lag = box.pvalue$lag[i],
+                              type = c("Ljung-Box"))$p.value
+}
+colnames(box.pvalue) = c("Lag", "p.value (original)", "p.value (d1ln)",
+                         "p.value (d1d1ln)", "p.value (d1d1d1ln)")
+
+box.pvalue$Lag = as.factor(box.pvalue$Lag)
+
+print(xtable(box.pvalue,
+             digits = 4, label = "tab:lbt1",
+             caption = "Ljung-Box test results for original 
+             and differentiated log-time series."),
+             caption.placement = "top", comment = FALSE, include.rownames = FALSE)
+```
+
+Formal tests to prove stationarity are given by Dickey-Fuller (DF), Phillips-Perron (PP) and Kwiatkowski-Phillips-Schmidt-Shin (KPSS); where the presence of unit roots (null hipothesis) against stationarity (alternative hypothesis) are tested for first two tests whereas the last one uses the stationarity as null hypothesis. Table \ref{tab:dfppkpss} shows p-values for each performed test, where it is clearly to see logged series has an unit root, but from first lag (d1lndolar) we get a stationary time series, thus we can claim that the time series has an unit root and it is stationary at first lag.
+
+```{r results = 'asis', warning=FALSE, message=FALSE}
+dolar.df.pp = data.frame(lndolar = c(adf.test(lndolar, k = 0)$p.value,
+                                     pp.test(lndolar, type = "Z(t_alpha)",
+                                             lshort = TRUE)$p.value,
+                                     pp.test(lndolar, type = "Z(t_alpha)",
+                                             lshort = FALSE)$p.value,
+                                     kpss.test(lndolar, null = "Level",
+                                               lshort = TRUE)$p.value,
+                                     kpss.test(lndolar, null = "Level",
+                                               lshort = FALSE)$p.value),
+                      d1lndolar = c(adf.test(d1lndolar, k = 0)$p.value,
+                                    pp.test(d1lndolar, type = "Z(t_alpha)",
+                                            lshort = TRUE)$p.value,
+                                    pp.test(d1lndolar, type = "Z(t_alpha)",
+                                            lshort = FALSE)$p.value,
+                                    kpss.test(d1lndolar, null = "Level",
+                                              lshort = TRUE)$p.value,
+                                    kpss.test(d1lndolar, null = "Level",
+                                              lshort = FALSE)$p.value),
+                      d1d1lndolar = c(adf.test(d1d1lndolar, k = 0)$p.value,
+                                      pp.test(d1d1lndolar, type = "Z(t_alpha)",
+                                              lshort = TRUE)$p.value,
+                                      pp.test(d1d1lndolar, type = "Z(t_alpha)",
+                                              lshort = FALSE)$p.value,
+                                      kpss.test(d1d1lndolar, null = "Level",
+                                                lshort = TRUE)$p.value,
+                                      kpss.test(d1d1lndolar, null = "Level",
+                                                lshort = FALSE)$p.value),
+                      d1d1d1lndolar = c(adf.test(d1d1d1lndolar, k = 0)$p.value,
+                                        pp.test(d1d1d1lndolar, type = "Z(t_alpha)",
+                                                lshort = TRUE)$p.value,
+                                        pp.test(d1d1d1lndolar, type = "Z(t_alpha)",
+                                                lshort = FALSE)$p.value,
+                                        kpss.test(d1d1d1lndolar, null = "Level",
+                                                  lshort = TRUE)$p.value,
+                                        kpss.test(d1d1d1lndolar, null = "Level",
+                                                  lshort = FALSE)$p.value))
+rownames(dolar.df.pp) = c("DickeyFuller", "PhillipsPerronShort", "PhillipsPerronLong",
+                          "KPSSShort", "KPSSLong")
+
+print(xtable(dolar.df.pp,
+             digits = 4, label = "tab:dfppkpss",
+             caption = "P-values of Dickey-Fullar, Phillips-Perron and 
+             Kwiatkowski-Phillips-Schmidt-Shin tests."),
+             caption.placement = "top", comment = FALSE, include.rownames = TRUE)
+```
+
+\subsection{Descriptive statistics} \label{subsec:descriptivestat}
+
+Some basic descriptive statistics show us the time series\footnote{Notice that only the first lagged is used} we are working with is not normal and has leptokurtic distribution (see Table \ref{tab:res1}) which is supported by the Jarque-Bera test, also such as Figure \ref{fig:normplot1} shows we can recognize there is an important influent outlier in the time series.
+
+```{r results = 'asis', warning=FALSE, message=FALSE}
+#Estad?sticos b?sicos de las series
+res = tibble(Min = min(d1lndolar),
+             Q1 = quantile(d1lndolar, probs = 0.25),
+             Mean = mean(d1lndolar), Median = median(d1lndolar),
+             Q3 = quantile(d1lndolar, probs = 0.75),
+             Sd = sd(d1lndolar),
+             Skewnesss = skewness(d1lndolar),
+             Kurtosis = kurtosis(d1lndolar, method = "moment"),
+             JarqueBera = normalTest(d1lndolar,
+                                     method = "jb")@test[["p.value"]][["Asymptotic p Value"]])
+
+print(xtable(res,
+             digits = 2, label = "tab:res1",
+             caption = "Descriptive statistics of the 
+             differentiated log-time series."),
+             caption.placement = "top", comment = FALSE,
+      include.rownames = FALSE)
+```
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:normplot1}Histogram and QQ-plot for normality assessment.", message=FALSE, warning=FALSE}
+# Histogram of returns with normal curve
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+hist(d1lndolar, breaks = 20, freq = F,
+     main = 'Differentiated log-time series histogram')
+curve(dnorm(x, mean = mean(d1lndolar),
+            sd = sd(d1lndolar)), col = 2, add = T)
+qqnorm(d1lndolar)
+qqline(d1lndolar, datax = FALSE, probs = c(0.025, 0.975), col = 2)
+```
+
+\section{Model for the mean} \label{sec:modelmean}
+
+\subsection{Identification} \label{subsec:modelmean1}
+
+As we saw in Section \ref{subsec:stationarity}, in particular in Figure \ref{fig:boxmeanvar}, there are differences on the variance so the logarithm must be applied, then one stationary difference was applied to find such stationary time series to work with, also an important thing to recall is seasonal pattern is not presence.
+
+To help the decision making we take into account the test performed above as well as (Partial)Auto-Correlation Function plots (see Figure \ref{fig:acf}) which show there would be two \textit{suitable} models: i) AR(1) and ii) MA(1).
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:acf2}ACF and PACF plots for differentiated log-time series.", message=FALSE, warning=FALSE}
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# differentiated log-time series
+acf(d1lndolar, ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)), lwd = 2,
+    lag.max = 40, xlim = c(2, 40))
+pacf(d1lndolar, ylim = c(-0.25, 0.25), col = c(rep(1, 11), 2), lwd = 2,
+     lag.max = 40, xlim = c(2, 40))
+```
+
+\subsection{Estimation} \label{subsec:modelmean2}
+
+Although we can recognize two possible models there would be an ARMA model based on the trend on (Partial)Auto-Correlation Function plots decay. For illustration purposes, we will consider $x_t$ as the original time series, then we can denote $\nabla log(x_t) = r_t$ as the log-return time series and $z_t$ a white noise (to prove in each ase) such as $z_t \sim WN(0, 1)$.
+
+The first model, represented in equation \eqref{eq:ar1}, is an AR(1). This model looks good in term of the significance of their parameters, also the log-likelihood = 5740.35 and the AIC = -11476.7.
+
+\begin{equation} \label{eq:ar1}
+r_t = 0.1191_{(.03)}r_{t-1} + z_t
+\end{equation}
+
+```{r results = 'hide'}
+# AR(1)
+
+(model1 = arima(d1lndolar, order = c(1, 0, 0), include.mean = FALSE))
+pnorm(c(abs(model1$coef)/sqrt(diag(model1$var.coef))),
+      mean = 0, sd = 1, lower.tail = FALSE)
+```
+
+The second model, represented in equation \eqref{eq:ma1}, is a MA(1). This model looks good in term of the significance of their parameters and achieves a bit better performance related to log-likelihood = 5740.71 and AIC =-11477.41.
+
+\begin{equation} \label{eq:ma1}
+r_t = z_t + 0.1234_{(.03)}z_{t-1}
+\end{equation}
+
+this model looks good in term of the significance of their parameters.
+
+```{r results = 'hide'}
+# MA(1)
+(model2 = arima(d1lndolar, order = c(0, 0, 1), include.mean = FALSE))
+pnorm(c(abs(model2$coef)/sqrt(diag(model2$var.coef))),
+      mean = 0, sd = 1, lower.tail = FALSE)
+```
+
+The third model is an ARMA(1, 1). This model is not good in term of the significance of their parameters, but good in term of log-likelihood = 5740.83 and AIC = -11475.65.
+
+\begin{equation}
+r_t = -0.114_{(.24)}r_{t-1} + z_t + 0.2333_{(.24)}z_{t-1}
+\end{equation}
+
+```{r results = 'hide'}
+# ARMA(1, 1)
+(model3 = arima(d1lndolar, order = c(1, 0, 1), include.mean = FALSE))
+pnorm(c(abs(model3$coef)/sqrt(diag(model3$var.coef))),
+      mean = 0, sd = 1, lower.tail = FALSE)
+```
+
+Thereby, AR(1) and MA(1) fit the data well, so the next step is related to analyze their residuals to test wheter we can consider them as white noise.
+
+\subsection{Diagnosis} \label{subsec:modelmean3}
+
+In this section we check the model assumptions taking into account residuals must be gaussian distributed, it means that residuals have zero-mean and constant variance as well as jointly independent white noise considering lags and their $\pi$ and $\psi$ weights for stationarity (causality) and invertibility, also we check their stability dropping-out some last observations as re-estimating the coefficients.
+
+\textbf{The first model to check is the AR(1)} which such as Figure \ref{fig:val1} shows looks good in terms of zero-mean and constant variance as well as (Partial)Auto-Correlation Function plots cut-off after first lag and inmediately, respectively. Also, the same idea but considering their squared values give us an idea about ARCH presence. Also, they seem to be normal distributed although some outliers, but are not jointly independent after lag number seven.
+
+```{r, fig.width = 10, fig.height = 13, fig.cap = "\\label{fig:val1}AR(1) residuals' analysis.", message=FALSE, warning=FALSE}
+par(font = 2, font.lab = 4, font.axis = 2, las = 1)
+layout(matrix(c(1, 1,
+                2, 3,
+                4, 5,
+                6, 7,
+                8, 8), nrow = 5, byrow = TRUE))
+plot(x = horizon[-1], y = scale(model1$residuals), type = "l",
+     xlab = "", ylab = "Standardized residuals", main = "AR(1)")
+acf(model1$residuals, ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Residuals", xlim = c(2, 40))
+acf(model1$residuals^2, ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Squared residuals", xlim = c(2, 40))
+pacf(model1$residuals, ylim = c(-0.25, 0.25), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, main = "Residuals", xlim = c(2, 40))
+pacf(model1$residuals^2, ylim = c(-0.25, 0.25), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, main = "Squared residuals", xlim = c(2, 40))
+hist(model1$residuals, breaks = 20, freq = F, xlab = "residuals",
+     main = 'Residual histogram')
+curve(dnorm(x, mean = mean(model1$residuals),
+            sd = sd(model1$residuals)), col = 2, add = T)
+qqnorm(model1$residuals)
+qqline(model1$residuals, datax = FALSE, probs = c(0.025, 0.975), col = 2)
+B = data.frame(Lag = 1:20)
+for (i in B$Lag) {
+  B[i, 2] = Box.test(model1$residuals, type = c("Ljung-Box"),
+                     lag = i, fitdf = i - (1+0))$p.value
+}
+plot(x = B$Lag, y = B$V2, xlab = "Lag", ylab = "p.value", pch = 21,
+     main = "Ljung-Box test", bg = ifelse(B$V2 > 0.05, "blue", "red"),
+     col = ifelse(B$V2 > 0.05, "blue", "red"))
+abline(h = 0.05, lty = 2, col = "blue")
+```
+
+To check wheter the model is stationary (causal) and invertible, we rewrite it in their AR($\infty$) and MA($\infty$) form, which give us $\psi$ and $\pi$-weights. These weights, which are shown in Table \ref{tab:weight1}, are lower than the unit and the root of the model is larger than one, so we can claim there is not invertibility problems and also it is causal.
+
+```{r results = 'asis'}
+# Stationary and Invertible
+  cat("\nModul of AR Characteristic polynomial Roots: ", 
+      Mod(polyroot(c(1,-model1$model$phi))),"\n")
+  # cat("\nModul of MA Characteristic polynomial Roots: ",
+  #     Mod(polyroot(c(1,model1$model$theta))),"\n")
+
+# Model expressed as an MA infinity (psi-weights)
+  psis = ARMAtoMA(ar = model1$model$phi, ma = model1$model$theta,
+                  lag.max = 40)
+  
+#Model expressed as an AR infinity (pi-weights)
+  pis = -ARMAtoMA(ar = -model1$model$theta, ma = -model1$model$phi,
+                  lag.max = 40)
+
+print(xtable(t(tibble("$\\psi_j$" = psis[1:10], "$\\pi_j$" = pis[1:10])),
+             digits = 4, label = "tab:weight1",
+             caption = "Weight of AR(1) as AR and MA infinity."),
+             caption.placement = "top", comment = FALSE,
+      include.rownames = TRUE, type = "latex", 
+      sanitize.rownames.function = function(x) {x})
+```
+
+Finally, the stability assessment is performed using the last 30 observations (to replicate a month). We see that the fitted models, represented in equation \eqref{eq:stab1}, has similar estimated coefficients, both significatives, and also similar log-likelihood (5740.35 and 5616.87) and AIC (-11476.7 and -11229.74) values, thereby we can say this model is stable.
+
+\begin{equation} \label{eq:stab1}
+r_t = 0.1191_{(.03)}r_{t-1} + z_t, \quad r_t = 0.1208_{(.03)}r_{t-1} + z_t
+\end{equation}
+
+```{r results = 'hide'}
+#### test period
+out = 30
+#### serie completa
+serie1 = dolar.ts
+#### serie hasta el penultimo año
+serie2 = head(dolar.ts, length(dolar.ts) - out)
+# tail(serie2, 1)
+(mod = arima(diff(log(serie1))[-1], order = c(1, 0, 0),
+             include.mean = FALSE))
+(mod2 = arima(diff(log(serie2))[-1], order = c(1, 0, 0),
+              include.mean = FALSE))
+```
+
+\textbf{The second model to check is the MA(1)} which such as Figure \ref{fig:val2} shows looks good in terms of zero-mean and constant variance as well as (Partial)Auto-Correlation Function plots cut-off after first lag and inmediately, respectively. Also, the same idea but considering their squared values give us an idea about ARCH presence. Also, they seem to be normal distributed although some outliers, but are not jointly independent after lag number nine.
+
+```{r, fig.width = 10, fig.height = 13, fig.cap = "\\label{fig:val2}MA(1) residuals' analysis.", message=FALSE, warning=FALSE}
+par(font = 2, font.lab = 4, font.axis = 2, las = 1)
+layout(matrix(c(1, 1,
+                2, 3,
+                4, 5,
+                6, 7,
+                8, 8), nrow = 5, byrow = TRUE))
+plot(x = horizon[-1], y = scale(model2$residuals), type = "l",
+     xlab = "", ylab = "Standardized residuals", main = "MA(1)")
+acf(model2$residuals, ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Residuals", xlim = c(2, 40))
+acf(model2$residuals^2, ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Squared residuals", xlim = c(2, 40))
+pacf(model2$residuals, ylim = c(-0.25, 0.25), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, main = "Residuals", xlim = c(2, 40))
+pacf(model2$residuals^2, ylim = c(-0.25, 0.25), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, main = "Squared residuals", xlim = c(2, 40))
+hist(model2$residuals, breaks = 20, freq = F, xlab = "residuals",
+     main = 'Residual histogram')
+curve(dnorm(x, mean = mean(model2$residuals),
+            sd = sd(model2$residuals)), col = 2, add = T)
+qqnorm(model2$residuals)
+qqline(model2$residuals, datax = FALSE, probs = c(0.025, 0.975), col = 2)
+B = data.frame(Lag = 1:20)
+for (i in B$Lag) {
+  B[i, 2] = Box.test(model2$residuals, type = c("Ljung-Box"),
+                     lag = i, fitdf = i - (0+1))$p.value
+}
+plot(x = B$Lag, y = B$V2, xlab = "Lag", ylab = "p.value", pch = 21,
+     main = "Ljung-Box test", bg = ifelse(B$V2 > 0.05, "blue", "red"),
+     col = ifelse(B$V2 > 0.05, "blue", "red"))
+abline(h = 0.05, lty = 2, col = "blue")
+```
+
+To check wheter the model is stationary (causal) and invertible, we rewrite it in their AR($\infty$) and MA($\infty$) form, which give us $\psi$ and $\pi$-weights. These weights, which are shown in Table \ref{tab:weight2}, are lower than the unit and the root of the model is larger than one, so we can claim there is not invertibility problems and also it is causal.
+
+```{r results = 'asis'}
+# Stationary and Invertible
+  # cat("\nModul of AR Characteristic polynomial Roots: ",
+  #     Mod(polyroot(c(1,-model2$model$phi))),"\n")
+  cat("\nModul of MA Characteristic polynomial Roots: ",
+      Mod(polyroot(c(1,model2$model$theta))),"\n")
+
+# Model expressed as an MA infinity (psi-weights)
+  psis = ARMAtoMA(ar = model2$model$phi, ma = model1$model$theta, lag.max = 40)
+  
+#Model expressed as an AR infinity (pi-weights)
+  pis = -ARMAtoMA(ar = -model2$model$theta, ma = -model1$model$phi, lag.max = 40)
+
+  
+print(xtable(t(tibble("$\\psi_j$" = psis[1:10], "$\\pi_j$" = pis[1:10])),
+             digits = 4, label = "tab:weight2",
+             caption = "Weight of MA(1) as AR and MA infinity."),
+             caption.placement = "top", comment = FALSE,
+      include.rownames = TRUE, type = "latex", 
+      sanitize.rownames.function = function(x) {x})
+```
+
+Finally, the stability assessment is performed using the last 30 observations (to replicate a month). We see that the fitted models, represented in equation \eqref{eq:stab2}, has similar estimated coefficients, both significatives, and also similar log-likelihood (5740.72 and 5617.27) and AIC (-11477.41 and -11230.53) values, thereby we can say this model is stable.
+
+\begin{equation} \label{eq:stab2}
+r_t = z_t + 0.1234_{(.03)}z_{t-1}, \quad r_t = z_t+ 0.1256_{(.03)}z_{t-1}
+\end{equation}
+
+```{r results = 'hide'}
+out = 30
+#### serie completa
+serie1 = dolar.ts
+#### serie incompleta
+serie2 = head(dolar.ts, length(dolar.ts) - out)
+(mod = arima(diff(log(serie1))[-1], order = c(0, 0, 1),
+             include.mean = FALSE))
+(mod2 = arima(diff(log(serie2))[-1], order = c(0, 0, 1),
+              include.mean = FALSE))
+```
+
+We have seen both models have good properties and behaviours, nevertheless their residuals are not jointly independent further than seven and nine lags, respectively. Also, we know that the AIC for AR(1) and MA(1) are -11475.65 and -11477.41, respectively, which would enable us to choose in favor of MA(1) model; so, both models has good properties to work with and any of them could be a good choise, but the criterias support a bit more in favor of MA model.
+
+\section{Model for the variance} \label{sec:modelvar}
+
+\subsection{Identification} \label{subsec:modelvar1}
+
+As we say above, residuals seem to behave as non-constant variance ones; thus we should test the presence of a volatility model. Thereby, we analyze the squared residuals for MA(1) which is the model we are working with and test if they lagged values are jointly independent by using Ljung-Box test. Figure \ref{fig:val3} shows there might be a possible dependence on their (Partial)Auto-Correlation Functions, which is supported by the p-values of performed test shown in Table \ref{tab:ljboxres2}.
+
+```{r, fig.width = 10, fig.height = 5, fig.cap = "\\label{fig:val3}(Partial)Auto-Correlation Function plots for AR(1) and MA(1) squared residuals.", message=FALSE, warning=FALSE}
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# acf(model1$residuals^2, ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+#     lwd = 2, lag.max = 40, main = "Squared residuals AR(1)", xlim = c(2, 40))
+acf(model2$residuals^2, ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "", xlim = c(2, 40))
+# pacf(model1$residuals^2, ylim = c(-0.25, 0.25), col = c(rep(1, 11), 2),
+#      lwd = 2, lag.max = 40, main = "Squared residuals AR(1)", xlim = c(2, 40))
+pacf(model2$residuals^2, ylim = c(-0.25, 0.25), col = c(rep(1, 11), 2),
+     lwd = 2, lag.max = 40, main = "", xlim = c(2, 40))
+```
+
+```{r results = 'asis'}
+B = data.frame(Lag = 1:10)
+for (i in B$Lag) {
+  # B[i, 2] = Box.test(model1$residuals^2, type = c("Ljung-Box"),
+  #                    lag = i, fitdf = i - (1+0))$p.value
+  B[i, 2] = round(Box.test(model2$residuals^2, type = c("Ljung-Box"),
+                           lag = i, fitdf = i - (0+1))$p.value, 4)
+}
+colnames(B) = c("Lag", "MA(1)")
+
+B$Lag = as.factor(B$Lag)
+
+print(xtable(t(B),
+             digits = 4, label = "tab:ljboxres2",
+             caption = "Ljung-Box test for MA(1) squared residuals."),
+      caption.placement = "top", comment = FALSE, include.rownames = TRUE,
+      include.colnames = FALSE)
+```
+
+\subsection{Estimation} \label{subsec:modelvar2}
+
+\textbf{MA(1)-GARCH(1, 1), under normal distribution} equation \eqref{eq:ma1garch11.n} shows the fitted model for the variance, the MA coefficient is significant ($0.1310_{(.03)}$), Figure \ref{fig:ma1garch11.n} shows there are not significant autocorrelation until 10 and 6 lag for ACF and PACF, respectively; related to possitivity and stationarity conditions they are satisfied since $\alpha_0$(omega), $\alpha_1$ and $\beta_1$ are positives, and $\alpha_1 + \beta_1 = 0.9905 < 1$, this last result also implies we wil get flat forecast ($>0.99$). Obtained results show the conditional volatility is not very sensitive to market events, because $\alpha_1 = 0.0248 (< 0.1)$, but the series takes long time to recover it, due to $\beta_1 = 0.9657 (>0.9)$.
+
+```{r}
+# MA(1)-GARCH(1, 1) normal
+spec = ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+                  mean.model = list(armaOrder=c(0, 1),
+                                    include.mean = FALSE),
+                  distribution.model = "norm")
+modelma1garch11.n = ugarchfit(spec = spec, data = d1lndolar)
+```
+
+```{r results = 'hide'}
+resma1garch11.n = data.frame(coef = round(modelma1garch11.n@fit[["coef"]], 4),
+                    std.error = round(modelma1garch11.n@fit[["se.coef"]], 4),
+                    p.value = round(modelma1garch11.n@fit$matcoef[,4], 4),
+                    robust.std.error = round(modelma1garch11.n@fit[["robust.se.coef"]], 4),
+                    robust.p.value = round(modelma1garch11.n@fit$robust.matcoef[,4], 4))
+
+print(xtable(resma1garch11.n,
+             digits = 4, label = "tab:ma1garch11.n",
+             caption = "Estimated coefficients for MA(1)-GARCH(1, 1) and their p-values under normal distribution."),
+             caption.placement = "top", comment = FALSE, include.rownames = TRUE)
+```
+
+\begin{equation} \label{eq:ma1garch11.n}
+\sigma_t^2 = 0.0000_{(.00)} + 0.0248_{(.13)}r_{t-1}^2 + 0.9657_{(.14)}\sigma_{t-1}^2
+\end{equation}
+
+we can see that $\omega$ as well as $\alpha_1$ are not significant in this case.
+
+```{r, fig.width = 10, fig.height = 5, fig.cap = "\\label{fig:ma1garch11.n}(Partial)Auto-Correlation Function plots for MA(1)-GARCH(1, 1) under normal distribution.", message=FALSE, warning=FALSE}
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# layout(matrix(c(1, 2,
+#                 3, 3), nrow = 2, byrow = TRUE))
+acf(scale(modelma1garch11.n@fit[["residuals"]]), ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Standardized residuals",
+    xlim = c(2, 40))
+acf(scale(modelma1garch11.n@fit[["residuals"]]^2), ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Standardized squared residuals",
+    xlim = c(2, 40))
+
+# plot(x = horizon[-1], y = abs(d1lndolar), type = "l",
+#      col = "blue", lwd = 1, ylim = c(0, max(abs(d1lndolar))),
+#      xlab = "", ylab = "Volatility")
+# lines(x = horizon[-1], y = sigma(modelma1garch11.n), col = "red", lwd = 3)
+# legend("topleft", legend = c("abs. Return", "Conditional SD"), col = c("blue", "red"),
+#        pch = "-", lwd = 5)
+```
+
+\textbf{MA(1)-GARCH(1, 1), under t-student distribution}, equation \eqref{eq:ma1garch11.t} shows the fitted model for the variance, the MA coefficient is significant ($0.0739_{(.02)}$), Figure \ref{fig:ma1garch11.t} shows there are not significant autocorrelation until 10 and 6 lag for ACF and PACF, respectively; related to possitivity and stationarity conditions they are satisfied since $\alpha_0$(omega), $\alpha_1$ and $\beta_1$ are positives, and $\alpha_1 + \beta_1 = 0.999 < 1$, this last result also implies we wil get flat forecast ($>0.99$). Obtained results show the conditional volatility is not very sensitive to market events, because $\alpha_1 = 0.0349 (< 0.1)$, but the series takes long time to recover it, due to $\beta_1 = 0.9641 (>0.9)$.
+
+```{r}
+# MA(1)-GARCH(1, 1) t-student
+spec = ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+                   mean.model = list(armaOrder=c(0, 1),
+                                     include.mean = FALSE), distribution.model = "std")
+modelma1garch11.t = ugarchfit(spec = spec, data = d1lndolar)
+```
+
+```{r results = 'hide'}
+resma1garch11.t = data.frame(coef = round(modelma1garch11.t@fit[["coef"]], 4),
+                    std.error = round(modelma1garch11.t@fit[["se.coef"]], 4),
+                    p.value = round(modelma1garch11.t@fit$matcoef[,4], 4),
+                    robust.std.error = round(modelma1garch11.t@fit[["robust.se.coef"]], 4),
+                    robust.p.value = round(modelma1garch11.t@fit$robust.matcoef[,4], 4))
+
+print(xtable(resma1garch11.t,
+             digits = 4, label = "tab:ma1garch11.t",
+             caption = "Estimated coefficients for MA(1)-GARCH(1, 1) and their p-values under t-student distribution."),
+             caption.placement = "top", comment = FALSE, include.rownames = TRUE)
+```
+
+\begin{equation} \label{eq:ma1garch11.t}
+\sigma_t^2 = 0.0000_{(.00)} + 0.0349_{(.02)}r_{t-1}^2 + 0.9641_{(.00)}\sigma_{t-1}^2
+\end{equation}
+
+we can see that $\omega$ as well as $\alpha_1$ are not significant in this case.
+
+```{r, fig.width = 10, fig.height = 5, fig.cap = "\\label{fig:ma1garch11.t}(Partial)Auto-Correlation Function plots for MA(1)-GARCH(1, 1) under t-student distribution.", message=FALSE, warning=FALSE}
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# layout(matrix(c(1, 2,
+#                 3, 3), nrow = 2, byrow = TRUE))
+acf(scale(modelma1garch11.t@fit[["residuals"]]), ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Standardized residuals",
+    xlim = c(2, 40))
+acf(scale(modelma1garch11.t@fit[["residuals"]]^2), ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Standardized squared residuals",
+    xlim = c(2, 40))
+
+# plot(x = horizon[-1], y = abs(d1lndolar), type = "l",
+#      col = "blue", lwd = 1, ylim = c(0, max(abs(d1lndolar))),
+#      xlab = "", ylab = "Volatility")
+# lines(x = horizon[-1], y = sigma(modelma1garch11.t), col = "red", lwd = 3)
+# legend("topleft", legend = c("abs. Return", "Conditional SD"), col = c("blue", "red"),
+#        pch = "-", lwd = 5)
+```
+
+\textbf{MA(1)-eGARCH(1, 1), under normal distribution} equation \eqref{eq:ma1egarch11.n} shows the fitted model for the variance,the MA coefficient is significant ($0.1430_{(.03)}$), Figure \ref{fig:ma1egarch11.n} shows there are not significant autocorrelation until 10 and 6 lag for ACF and PACF, respectively, on the other hand. We have that the effect of negative news the previous day is $-\alpha_1 + \gamma_1 = -0.0387 + 0.0362 = -0.0025$ and the possitive news is $\alpha_1 + \gamma_1 = 0.0387 + 0.0362 = 0.0749$, therefore we have that possitive news has grater effect than negative ones; the persistence of volatility is very high ($\beta_1 = 0.9867$).
+
+```{r}
+# MA(1)-eGARCH(1, 1) normal
+spec = ugarchspec(variance.model = list(model = "eGARCH", garchOrder = c(1, 1)),
+                  mean.model = list(armaOrder=c(0, 1),
+                                    include.mean = FALSE),
+                  distribution.model = "norm")
+modelma1egarch11.n = ugarchfit(spec = spec, data = d1lndolar)
+```
+
+```{r results = 'hide'}
+resma1egarch11.n = data.frame(coef = round(modelma1egarch11.n@fit[["coef"]], 4),
+                    std.error = round(modelma1egarch11.n@fit[["se.coef"]], 4),
+                    p.value = round(modelma1egarch11.n@fit$matcoef[,4], 4),
+                    robust.std.error = round(modelma1egarch11.n@fit[["robust.se.coef"]], 4),
+                    robust.p.value = round(modelma1egarch11.n@fit$robust.matcoef[,4], 4))
+
+print(xtable(resma1egarch11.n,
+             digits = 4, label = "tab:ma1egarch11.n",
+             caption = "Estimated coefficients for MA(1)-eGARCH(1, 1) and their p-values under normal distribution."),
+             caption.placement = "top", comment = FALSE, include.rownames = TRUE)
+```
+
+\begin{equation} \label{eq:ma1egarch11.n}
+ln(\sigma_t^2) = -0.1390_{(.00)} + 0.0387_{(.01)} \frac{r_{t-1}}{\sqrt{\sigma_{t-1}^2}} + 0.9867_{(.00)}ln(\sigma_{t-1}^2)  + 0.0362_{(.00)} \left( \frac{|r_{t-1}|}{\sqrt{\sigma_{t-1}^2}} - \frac{2}{\pi} \right)
+\end{equation}
+
+we can see that all the parameters are significatives.
+
+```{r, fig.width = 10, fig.height = 5, fig.cap = "\\label{fig:ma1egarch11.n}(Partial)Auto-Correlation Function plots for MA(1)-eGARCH(1, 1) under normal distribution.", message=FALSE, warning=FALSE}
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# layout(matrix(c(1, 2,
+#                 3, 3), nrow = 2, byrow = TRUE))
+acf(scale(modelma1egarch11.n@fit[["residuals"]]), ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Standardized residuals",
+    xlim = c(2, 40))
+acf(scale(modelma1egarch11.n@fit[["residuals"]]^2), ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Standardized squared residuals",
+    xlim = c(2, 40))
+
+# plot(x = horizon[-1], y = abs(d1lndolar), type = "l",
+#      col = "blue", lwd = 1, ylim = c(0, max(abs(d1lndolar))),
+#      xlab = "", ylab = "Volatility")
+# lines(x = horizon[-1], y = sigma(modelma1egarch11.n), col = "red", lwd = 3)
+# legend("topleft", legend = c("abs. Return", "Conditional SD"), col = c("blue", "red"),
+#        pch = "-", lwd = 5)
+```
+
+\textbf{MA(1)-eGARCH(1, 1), under t-student distribution} equation \eqref{eq:ma1egarch11.t} shows the fitted model for the variance, the MA coefficient is significant ($0.0729_{(.02)}$), Figure \ref{fig:ma1egarch11.t} shows there are not significant autocorrelation until 10 and 6 lag for ACF and PACF, respectively. We have that the effect of negative news the previous day is $-\alpha_1 + \gamma_1 = -0.1913+0.0918 = -0.0995$ and the possitive news is $\alpha_1 + \gamma_1 = 0.1913+0.0918 = 0.2831$, therefore we have that possitive news has grater effect than negative ones; the persistence of volatility is very high ($\beta_1 = 0.9725$).
+
+```{r}
+# MA(1)-eGARCH(1, 1) t-student
+spec = ugarchspec(variance.model = list(model = "eGARCH", garchOrder = c(1, 1)),
+                  mean.model = list(armaOrder=c(0, 1),
+                                    include.mean = FALSE), distribution.model = "std")
+modelma1egarch11.t = ugarchfit(spec = spec, data = d1lndolar)
+```
+
+```{r results = 'hide'}
+resma1egarch11.t = data.frame(coef = round(modelma1egarch11.t@fit[["coef"]], 4),
+                    std.error = round(modelma1egarch11.t@fit[["se.coef"]], 4),
+                    p.value = round(modelma1egarch11.t@fit$matcoef[,4], 4),
+                    robust.std.error = round(modelma1egarch11.t@fit[["robust.se.coef"]], 4),
+                    robust.p.value = round(modelma1egarch11.t@fit$robust.matcoef[,4], 4))
+
+print(xtable(resma1egarch11.t,
+             digits = 4, label = "tab:ma1egarch11.t",
+             caption = "Estimated coefficients for MA(1)-eGARCH(1, 1) and their p-values under t-student distribution."),
+             caption.placement = "top", comment = FALSE, include.rownames = TRUE)
+```
+
+\begin{equation} \label{eq:ma1egarch11.t}
+ln(\sigma_t^2) = -0.2448_{(.01)} + 0.1913_{(.04)} \frac{r_{t-1}}{\sqrt{\sigma_{t-1}^2}} + 0.9725_{(.00)}ln(\sigma_{t-1}^2)  + 0.0918_{(.03)} \left( \frac{|r_{t-1}|}{\sqrt{\sigma_{t-1}^2}} - \frac{2}{\pi} \right)
+\end{equation}
+
+we can see that all the parameters are significatives.
+
+```{r, fig.width = 10, fig.height = 5, fig.cap = "\\label{fig:ma1egarch11.t}(Partial)Auto-Correlation Function plots for MA(1)-eGARCH(1, 1) under t-student distribution.", message=FALSE, warning=FALSE}
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# layout(matrix(c(1, 2,
+#                 3, 3), nrow = 2, byrow = TRUE))
+acf(scale(modelma1egarch11.t@fit[["residuals"]]), ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Standardized residuals",
+    xlim = c(2, 40))
+acf(scale(modelma1egarch11.t@fit[["residuals"]]^2), ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Standardized squared residuals",
+    xlim = c(2, 40))
+
+# plot(x = horizon[-1], y = abs(d1lndolar), type = "l",
+#      col = "blue", lwd = 1, ylim = c(0, max(abs(d1lndolar))),
+#      xlab = "", ylab = "Volatility")
+# lines(x = horizon[-1], y = sigma(modelma1egarch11.t), col = "red", lwd = 3)
+# legend("topleft", legend = c("abs. Return", "Conditional SD"), col = c("blue", "red"),
+#        pch = "-", lwd = 5)
+```
+
+\textbf{MA(1)-gjrGARCH(1, 1), under normal distribution} equation \eqref{eq:ma1gjrgarch11.n} shows the fitted model for the variance, the MA coefficient is significant ($0.1396_{(.03)}$), Figure \ref{fig:ma1gjrgarch11.n} shows there are not significant autocorrelation until 10 and 6 lag for ACF and PACF, respectively. In this model, we can see that $\alpha_1 + \beta_1 + 0.5\times \gamma_1 = 0.0310+0.9820-0.5 \times 0.0326 = 0.9967 < 1$, so the model is stationary. We have that the effect of negative news the previous day is $-\alpha_1 + \gamma_1 = -0.0310-0.0326 = -0.0636$ and the possitive news is $\alpha_1 = 0.0310$, therefore we have that possitive news has grater effect than negative ones; the persistence of volatility is very high ($\beta_1 = 0.9820$).
+
+```{r}
+# MA(1)-gjrGARCH(1, 1) normal
+spec = ugarchspec(variance.model = list(model = "gjrGARCH", garchOrder = c(1, 1)),
+                  mean.model = list(armaOrder=c(0, 1),
+                                    include.mean = FALSE),
+                  distribution.model = "norm")
+modelma1gjrgarch11.n = ugarchfit(spec = spec, data = d1lndolar)
+```
+
+```{r results = 'hide'}
+resma1gjrgarch11.n = data.frame(coef = round(modelma1gjrgarch11.n@fit[["coef"]], 4),
+                    std.error = round(modelma1gjrgarch11.n@fit[["se.coef"]], 4),
+                    p.value = round(modelma1gjrgarch11.n@fit$matcoef[,4], 4),
+                    robust.std.error = round(modelma1gjrgarch11.n@fit[["robust.se.coef"]], 4),
+                    robust.p.value = round(modelma1gjrgarch11.n@fit$robust.matcoef[,4], 4))
+
+print(xtable(resma1gjrgarch11.n,
+             digits = 4, label = "tab:ma1gjrgarch11.n",
+             caption = "Estimated coefficients for MA(1)-gjrGARCH(1, 1) and their p-values under normal distribution."),
+             caption.placement = "top", comment = FALSE, include.rownames = TRUE)
+```
+
+\begin{equation} \label{eq:ma1gjrgarch11.n}
+\sigma_t^2 = 0.0000_{(.00)} + 0.0310_{(.01)}r_{t-1}^2 + 0.9820_{(.01)}\sigma_{t-1}^2 - 0.0326_{(.01)}S^-_{t}r_{t-1}^2
+\end{equation}
+
+where $S^-_{t}$ is 1 if $r_{t-1} < 0$ and 0 otherwise. We can see that $\omega$ is not significantive in this case.
+
+```{r, fig.width = 10, fig.height = 5, fig.cap = "\\label{fig:ma1gjrgarch11.n}(Partial)Auto-Correlation Function plots for MA(1)-gjrGARCH(1, 1) under normal distribution.", message=FALSE, warning=FALSE}
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# layout(matrix(c(1, 2,
+#                 3, 3), nrow = 2, byrow = TRUE))
+acf(scale(modelma1gjrgarch11.n@fit[["residuals"]]), ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Standardized residuals",
+    xlim = c(2, 40))
+acf(scale(modelma1gjrgarch11.n@fit[["residuals"]]^2), ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Standardized squared residuals",
+    xlim = c(2, 40))
+
+# plot(x = horizon[-1], y = abs(d1lndolar), type = "l",
+#      col = "blue", lwd = 1, ylim = c(0, max(abs(d1lndolar))),
+#      xlab = "", ylab = "Volatility")
+# lines(x = horizon[-1], y = sigma(modelma1gjrgarch11.n), col = "red", lwd = 3)
+# legend("topleft", legend = c("abs. Return", "Conditional SD"), col = c("blue", "red"),
+#        pch = "-", lwd = 5)
+```
+
+\textbf{MA(1)-gjrGARCH(1, 1), under t-student distribution} equation \eqref{eq:ma1gjrgarch11.t} shows the fitted model for the variance, the MA coefficient is significant ($0.0752_{(.02)}$), Figure \ref{fig:ma1gjrgarch11.t} shows there are not significant autocorrelation until 10 and 6 lag for ACF and PACF, respectively.  In this model, we can see that $\alpha_1 + \beta_1 + 0.5\times \gamma_1 = 0.2260+0.9289-\times 0.3117 = 0.9991 < 1$, so the model is stationary. We have that the effect of negative news the previous day is $-\alpha_1 + \gamma_1 = -0.2260-0.3117 = -0.5377$ and the possitive news is $\alpha_1 = 0.2260$, therefore we have that possitive news has grater effect than negative ones; the persistence of volatility is very high ($\beta_1 = 0.9289$).
+
+```{r}
+# MA(1)-gjrGARCH(1, 1) t-student
+spec = ugarchspec(variance.model = list(model = "gjrGARCH", garchOrder = c(1, 1)),
+                   mean.model = list(armaOrder=c(0, 1),
+                                     include.mean = FALSE), distribution.model = "std")
+modelma1gjrgarch11.t = ugarchfit(spec = spec, data = d1lndolar)
+```
+
+```{r results = 'hide'}
+resma1gjrgarch11.t = data.frame(coef = round(modelma1gjrgarch11.t@fit[["coef"]], 4),
+                    std.error = round(modelma1gjrgarch11.t@fit[["se.coef"]], 4),
+                    p.value = round(modelma1gjrgarch11.t@fit$matcoef[,4], 4),
+                    robust.std.error = round(modelma1gjrgarch11.t@fit[["robust.se.coef"]], 4),
+                    robust.p.value = round(modelma1gjrgarch11.t@fit$robust.matcoef[,4], 4))
+
+print(xtable(resma1gjrgarch11.t,
+             digits = 4, label = "tab:ma1gjrgarch11.t",
+             caption = "Estimated coefficients for MA(1)-gjrGARCH(1, 1) and their p-values under t-student distribution."),
+             caption.placement = "top", comment = FALSE, include.rownames = TRUE)
+```
+
+\begin{equation} \label{eq:ma1gjrgarch11.t}
+\sigma_t^2 = 0.0000_{(.00)} + 0.2260_{(.00)}r_{t-1}^2 + 0.9289_{(.01)}\sigma_{t-1}^2  -0.3117_{(.00)}S^-_{t}r_{t-1}^2
+\end{equation}
+
+where $S^-_{t}$ is 1 if $r_{t-1} < 0$ and 0 otherwise. We can see that are the parameters are significantives in this case.
+
+```{r, fig.width = 10, fig.height = 5, fig.cap = "\\label{fig:ma1gjrgarch11.t}(Partial)Auto-Correlation Function plots for MA(1)-gjrGARCH(1, 1) under t-student distribution.", message=FALSE, warning=FALSE}
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# layout(matrix(c(1, 2,
+#                 3, 3), nrow = 2, byrow = TRUE))
+acf(scale(modelma1gjrgarch11.t@fit[["residuals"]]), ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Standardized residuals",
+    xlim = c(2, 40))
+acf(scale(modelma1gjrgarch11.t@fit[["residuals"]]^2), ylim = c(-0.25, 0.25), col = c(2, rep(1, 11)),
+    lwd = 2, lag.max = 40, main = "Standardized squared residuals",
+    xlim = c(2, 40))
+
+# plot(x = horizon[-1], y = abs(d1lndolar), type = "l",
+#      col = "blue", lwd = 1, ylim = c(0, max(abs(d1lndolar))),
+#      xlab = "", ylab = "Volatility")
+# lines(x = horizon[-1], y = sigma(modelma1gjrgarch11.t), col = "red", lwd = 3)
+# legend("topleft", legend = c("abs. Return", "Conditional SD"), col = c("blue", "red"),
+#        pch = "-", lwd = 5)
+```
+
+\subsection{Diagnosis} \label{subsec:modelvar3}
+
+We have seen before several volatility models based on MA(1) model varying the GARCH(1, 1) version as well as the distribution of the model where their conditions and significance of the estimated parameters were checked, also the (Partial)Auto-Correlation Function plots were analyzed. This last analysis does not give us usefull information since all the models have the same behaviour. On the other hand, the significance of the estimated parameters enables us to discard some of them; but the main analysis it is on information criterions as AIC and BIC to select the more suitable model. Table \ref{tab:diaggarch} shows the summary of all the models considering both information criterions as well as whether all estimated parameters are significatives in each case. Based on this, we select the MA(1)-eGARCH(1, 1) t-student distributed model as the better fitted model for this case.
+
+```{r results = 'asis'}
+diag = data.frame(Model = c("MA(1)-GARCH(1, 1) normal",
+                            "MA(1)-GARCH(1, 1) t-student",
+                            "MA(1)-eGARCH(1, 1) normal",
+                            "MA(1)-eGARCH(1, 1) t-student",
+                            "MA(1)-gjrGARCH(1, 1) normal",
+                            "MA(1)-gjrGARCH(1, 1) t-student"),
+                  AIC = c(infocriteria(modelma1garch11.n)[1],
+                          infocriteria(modelma1garch11.t)[1],
+                          infocriteria(modelma1egarch11.n)[1],
+                          infocriteria(modelma1egarch11.t)[1],
+                          infocriteria(modelma1gjrgarch11.n)[1],
+                          infocriteria(modelma1gjrgarch11.t)[1]),
+                  BIC = c(infocriteria(modelma1garch11.n)[2],
+                          infocriteria(modelma1garch11.t)[2],
+                          infocriteria(modelma1egarch11.n)[2],
+                          infocriteria(modelma1egarch11.t)[2],
+                          infocriteria(modelma1gjrgarch11.n)[2],
+                          infocriteria(modelma1gjrgarch11.t)[2]),
+                  Significance = c("", "", "*", "*", "", "*"))
+
+print(xtable(diag,
+             digits = 4, label = "tab:diaggarch",
+             caption = "Information criterions for model selection"),
+             caption.placement = "top", comment = FALSE, include.rownames = FALSE)
+```
+
+\section{Volatility analysis} \label{sec:volanalysis}
+
+\subsection{Estimated volatility and news impact} \label{subsec:volnews}
+
+As we saw above in equation \eqref{eq:ma1egarch11.t}, our conclusion was the possitive news have greater impact than negative ones, which Figure \ref{fig:volnews} shows since we have an increasing trend in the curve, also in the same we can see how volatility behaves throughout time where we can clearly see the fitted model (red line) can gets the trend of the volatility but there are some valleys where it fails and hold the increasing/decreasing trend of the past observed values.
+
+```{r, fig.width = 10, fig.height = 7, fig.cap = "\\label{fig:volnews}Estimated volatility and news impact curve for MA(1)-eGARCH(1, 1) under t-student distribution.", message=FALSE, warning=FALSE}
+par(mfrow = c(2, 1), font = 2, font.lab = 4, font.axis = 2, las = 1)
+
+# v = sigma(modelma1egarch11.t) #para obtener la volatilidad estimada, 
+# v_anualizada = (250)^0.5*v
+# plot(v_anualizada)
+# write.table(v_anualizada,file = "volatility.csv", sep = ";")
+
+# ni = newsimpact(z = NULL, modelma1egarch11.t)
+# plot(ni$zx, ni$zy, ylab = ni$yexpr, xlab = ni$xexpr,
+#      type = "l", main = "News Impact Curve")
+
+plot(modelma1egarch11.t, which = 3) # which = "all"
+plot(modelma1egarch11.t, which = 12) # which = "all"
+
+# plot(x = horizon[-1], y = abs(d1lndolar), type = "l",
+#      col = "black", lwd = 1, ylim = c(0, max(abs(d1lndolar))),
+#      xlab = "", ylab = "Volatility")
+# lines(x = horizon[-1], y = sigma(modelma1egarch11.t), col = "red", lwd = 3)
+# legend("topleft", legend = c("abs. Return", "Conditional SD"), col = c("black", "red"),
+#        pch = "-", lwd = 5)
+```
+
+\subsection{Forecasting} \label{subsec:volforecasting}
+
+Se perform a forecasting using the MA(1)-eGARCH(1, 1) t-student distributed model using the last 30 observations to see how the model would performs on an hypothetical situation and then forecast for the future.
+
+```{r}
+out = 30
+#### serie completa
+serie1 = d1lndolar
+
+# MA(1)-eGARCH(1, 1) t-student
+spec = ugarchspec(variance.model = list(model = "eGARCH", garchOrder = c(1, 1)),
+                  mean.model = list(armaOrder = c(0, 1),
+                                    include.mean = FALSE), distribution.model = "std")
+modelma1egarch11.t.1 = ugarchfit(spec = spec, data = serie1, out.sample = out)
+forcast1 = ugarchforecast(modelma1egarch11.t.1, n.ahead = out, n.roll = out)
+
+results1 = fitted(forcast1)[1, ] + sigma(forcast1)[1, ]
+results2 = fitted(forcast1)[1, ] - sigma(forcast1)[1, ]
+
+modelma1egarch11.t.2 = ugarchfit(spec = spec, data = d1lndolar, out.sample = 0)
+forcast2 = ugarchforecast(modelma1egarch11.t.2, n.ahead = 1, n.roll = 0)
+
+# results3 = fitted(forcast2) + sigma(forcast2)
+# results4 = fitted(forcast2) - sigma(forcast2)
+```
+
+Figure \ref{fig:forecast} shows the model estimated curve and how the volatility behavesfor last 30 days of the log-returns; on the other hand, Figure \ref{fig:forecast1} shows a forecasting through simulation for next 100 days.
+
+```{r, fig.width = 10, fig.height = 5, fig.cap = "\\label{fig:forecast}Estimated curve using MA(1)-eGARCH(1, 1) under t-student distribution for log-returns with 1-sigma and volatility for last 30 days.", message=FALSE, warning=FALSE, results = 'hide'}
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+### Mean
+# known date
+plot(x = tail(horizon, out + 1), y = tail(serie1, out + 1), type = "l",
+     col = "black", lwd = 1, ylim = c(min(serie1), max(serie1)),
+     xlab = "", ylab = "d1lndolar", main = "")
+lines(x = tail(horizon, out + 1), y = fitted(forcast1)[1, ],
+      col = "blue", lwd = 3)
+lines(x = tail(horizon, out + 1), y = results1, col = "red", lwd = 3)
+lines(x = tail(horizon, out + 1), y = results2, col = "red", lwd = 3)
+
+### Variance
+# known date
+plot(x = tail(horizon, out + 1), y = sigma(forcast1)[1, ], type = "l",
+     xlab = "", ylab = "Volatility", main = "")
+```
+
+```{r, fig.width = 10, fig.height = 5, fig.cap = "\\label{fig:forecast1}Forecasting through simulation using MA(1)-eGARCH(1, 1) under t-student distribution.", message=FALSE, warning=FALSE}
+sim = ugarchsim(modelma1egarch11.t, n.sim = 100, m.sim = 10^5, rseed = 1)
+simSig = as.data.frame(sim@simulation[["sigmaSim"]])
+simSer = as.data.frame(sim@simulation[["seriesSim"]])
+# show(sim)
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+plot(sim, which = 2, m.sim = 10^5, xlab = "") # which = "all"
+plot(sim, which = 1, m.sim = 10^5, xlab = "") # which = "all"
+```
+
+\subsection{Exponential Weighted Moving Average and historical volatility} \label{subsec:vol.ewmahist}
+
+Other ways to estimate the volatility is by using Exponential Weighted Moving Average (EWMA) and historical volatility associated to the time series we are working with.
+
+\textbf{Exponential Weighted Moving Average} Figure \ref{fig:ewma1} shows the estimated volatility using the EWMA method with different $\lambda$ setting at different confidence levels.
+
+```{r}
+lambda = seq(0.25, 0.75, 0.25)
+ewma = data.frame(Date = horizon[-1])
+for (i in 1:length(lambda)) {
+  # note: in EWMA lambda is actually 1-lambda
+  ewma = cbind(ewma, EWMA(d1lndolar^2, lambda = lambda[i]))
+}
+# aca corrijo el valor del lambda que es 1-lambda
+colnames(ewma) = c("Date", 1 - lambda)
+```
+
+```{r}
+vol = cbind(horizon[-1], sqrt(ewma[, -1]),
+            as.data.frame(sigma(modelma1egarch11.t)),
+            as.data.frame(d1lndolar))
+
+colnames(vol) = c("Date", paste0("EWMA", 1-lambda),
+                  "MA(1)-eGARCH(1,1)", "d1lndolar")
+```
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:ewma1}EWMA and MA(1)-eGARCH(1, 1) t-student distributed volatility plot.", message=FALSE, warning=FALSE}
+vol %>% gather(key = "Model", value = "Volatility", -Date, -d1lndolar) %>%
+  ggplot() + geom_line(aes(x = Date, y = d1lndolar)) +
+  geom_line(aes(x = Date, y = Volatility, col = Model)) +
+  ylab("Volatility") +
+  theme_bw() + xlab("") +
+  theme(plot.title = element_text(hjust = 0.5),
+        text = element_text(size = 16),
+        legend.position = "bottom",
+        legend.text = element_text(size = 16))
+```
+
+\textbf{Historical volatility} Figure \ref{fig:sma1} shows the estimated volatility using the historical volatility through smoothing moving average (SMA) considering different time periods. We can see that volatility is not smooth for short time windows and its curve has a sinusoidal behaviour, if we consider 150 or 210 days we get a smooth curve throughout time.
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:sma1}Historical volatility plot.", message=FALSE, warning=FALSE}
+# SMA: calculates the arithmetic mean of the series over the past n observations
+out = seq(30, 210, 60)
+vol.hist = data.frame(Date = horizon[-1])
+for (i in 1:length(out)) {
+  vol.hist[, i+1] = c(rep(0, out[i] - 1), SMA(d1lndolar^2, n = out[i]))
+}
+colnames(vol.hist) = c("Date", out)
+# vol.hist = vol.hist %>% replace(is.na(.), 0)
+
+vol.hist %>% gather(key = "Days", value = "Volatility", -Date) %>%
+  ggplot() + geom_line(aes(x = Date, y = Volatility, col = Days)) +
+  theme_bw() + xlab("") +
+  xlim(c(tail(horizon[-1], length(horizon[-1]) - out[i])[1],
+         tail(horizon[-1], 1))) +
+  theme(plot.title = element_text(hjust = 0.5),
+        text = element_text(size = 16),
+        legend.position = "bottom",
+        legend.text = element_text(size = 16))
+```
+
+\subsection{Value-at-Risk} \label{subsec:var}
+
+Once we have computed the volatility using different methods, we can compute the Value-at-Risk (VaR) thoughout time; thus, using confidence levels of $95\%$ and $99\%$ we get the VaR using different EWMA and MA(1)-eGARCH(1, 1) t-student distributed model. Figure \ref{fig:var1} shows the obtained curves for both confidence levels where the black line represents the observed log-returns. We can see the EWMA estimated volatility using $\lambda = 0.75$ looks like to MA(1)-eGARCH(1, 1) t-student distributed estimated model in terms of pattern with a level shift.
+
+```{r}
+alpha = c(0.95, 0.99)
+var.ewma = data.frame(date = horizon[-1])
+var.ma1egarch11.t = data.frame(date = horizon[-1])
+for (i in 1:length(alpha)) {
+  var.ewma[, (ncol(ewma[-1])*(i-1)+2):(i*ncol(ewma[-1])+1)] = qnorm(alpha[i])*sqrt(ewma[, -1])
+  var.ma1egarch11.t[, i] = qnorm(alpha[i])*as.data.frame(sigma(modelma1egarch11.t))
+}
+var = cbind(var.ewma, var.ma1egarch11.t,
+            as.data.frame(d1lndolar$Valor))
+cod = expand_grid(alpha, lambda)
+colnames(var) = c("Date", paste0("EWMA", 1-cod$lambda, ";",cod$alpha),
+                  paste0("MA(1)-eGARCH(1,1)", ";",alpha), "d1lndolar")
+```
+
+```{r, fig.width = 10, fig.height = 7, fig.cap = "\\label{fig:var1}Value-at-Risk for different models at different confidence levels.", message=FALSE, warning=FALSE}
+var %>% gather(key = "Model", value = "VaR", -Date, -d1lndolar) %>%
+  separate(Model, c("Model", "Confidence"), ";") %>%
+  ggplot() + geom_line(aes(x = Date, y = d1lndolar)) +
+  geom_line(aes(x = Date, y = VaR, col = Model)) +
+  facet_grid(Confidence~.) +
+  theme_bw() + xlab("") +
+  ylab("Value-at-Risk") +
+  theme(plot.title = element_text(hjust = 0.5),
+        text = element_text(size = 16),
+        legend.position = "bottom",
+        legend.text = element_text(size = 16))
+```
+
+Table \ref{tab:varmodels} shows the fraction of sample where loss exceed VaR for estimated models at confidence levels of $95\%$ and $99\%$ where we can see that the nearest estimated fraction to significance level is obtained from EWMA with $\lambda = 0.75$, in this case we can see that other models are overreacting to risk; however, we are obtaining that the country would have more money tied up than necessary.
+
+```{r results = 'asis'}
+# si la fraccion esta debajo de la significancia significa que hay mas dinero inmobilizado que el necesario, en otro caso podria no estar cubriendo las necesidades.
+
+aux = var %>% dplyr::select(-c(Date, d1lndolar)) %>%
+  apply(., 2, function(x) sum(d1lndolar < -x)/length(d1lndolar)) %>%
+  as.data.frame()
+aux$Model = rownames(aux)
+rownames(aux) = c(1:nrow(aux))
+colnames(aux) = c("value", "Model")
+aux = aux %>% separate(Model, c("Model", "Confidence"), ";") %>%
+  spread(key = "Model", value = "value")
+
+print(xtable(aux,
+             digits = 4, label = "tab:varmodels",
+             caption = "Summary for fraction of sample where loss exceed 
+             VaR for EWMA and eGARCH(1,1)"),
+             caption.placement = "top", comment = FALSE, include.rownames = FALSE)
+```
+
+```{r}
+var95 = round(qnorm(0.95)*sigma(forcast2)*100, 2)
+```
+
+An useful application is realted to predict the 1-step-ahead value using this model to get the VaR at $(1-\alpha)$\%; on this way, using the variance-covariance method with MA(1)-eGARCH(1, 1) t-student distributed model, Value-at-Risk (VaR) at $95\%$ is equal to `r var95`\%, which corresponds to the maximum expected loss for `r tail(horizon,1)+1`.
+
+\section{Dynamic Conditional Correlation (DCC) Multivariate model} \label{sec:multivariant}
+
+Figure \ref{fig:ts1} shows the times series for both CLP/Dolar and Copper values throughout time, in this we can clearly see there is a pattern that involves both curves which is interpreted as when one of them increase their value the other decrease, and viceversa. On the other hand, Figure \ref{fig:ts2} shows the log-returns where a zero-mean is presents and changes on Copper are shorter than in CLP/Dolar; however, at first glance both seem to be overlapped but looking it in detail we can see that there is a kind of lag in their changes, i.e. changes on one series being reflected in the other few days after. A clear example of this pattern occurs at the end of 2017, where a negative log-return in Copper happens in CLP/Dolar few days after. Thus, we can claim that both series are correlated cause they interact following an inverse (lagged) pattern.
+
+```{r}
+cobre = read_excel("Cobre.xlsx")
+cobre$Dia = as.Date(as.POSIXct(strptime(cobre$Dia, "%Y-%m-%d")))
+cobre.ts = left_join(data.frame(Dia = horizon), cobre, by = c("Dia"))
+
+colnames(cobre.ts) = c("Dia", "Valor")
+# values for non-trading days take the past values, e.g.
+# value at saturday corresponds to friday's
+cobre.ts = na.locf(cobre.ts, fromLast = FALSE)
+cobre.ts = xts(cobre.ts$Valor, cobre.ts$Dia)
+colnames(cobre.ts) = c("Valor")
+
+multi.ts = data.frame(Dolar = dolar.ts, Copper = cobre.ts)
+colnames(multi.ts) = c("Dolar", "Copper")
+```
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:ts1}Time series for CLP/USD stock exchange and pound of copper value.", message=FALSE, warning=FALSE}
+# Grafico de la series temporale
+multi.ts %>% mutate (Date = horizon) %>%
+  gather(key = "Serie", value = "Value", -Date) %>%
+  ggplot() + geom_line(aes(x = Date, y = Value, col = Serie), alpha = 0.5) +
+  theme_bw() + xlab("") +
+  theme(plot.title = element_text(hjust = 0.5),
+        text=element_text(size = 16),
+        legend.position = "bottom",
+        legend.text = element_text(size = 16))
+```
+
+```{r, fig.width = 10, fig.asp = 0.5, fig.cap = "\\label{fig:ts2}Log-returns for CLP/USD stock exchange and pound of copper value.", message=FALSE, warning=FALSE}
+d1lnserie = as.data.frame(apply(multi.ts, 2, function(x) diff(log(x))))
+d1lnserie %>% mutate (Date = horizon[-1]) %>%
+  gather(key = "Serie", value = "Value", -Date) %>%
+  ggplot() + geom_line(aes(x = Date, y = Value, col = Serie), alpha = 0.7) +
+  theme_bw() + xlab("") +
+  theme(plot.title = element_text(hjust = 0.5),
+        text=element_text(size = 16),
+        legend.position = "bottom",
+        legend.text = element_text(size = 16))
+```
+
+\subsection{Model for the variance} \label{subsec:multimodel}
+
+For Copper time series we consider a zero-mean sGARCH(0, 1) t-distributed model with $\omega = 0$.Thus, the estimated coefficients for DCC(1, 1) multivariate model are shown in Table \ref{tab:dcc}. From this, we have that the impact on past shock do not affect to the correlation, but the correlation is really persistence.
+
+```{r results = 'hide'}
+spec1 = ugarchspec(mean.model = list(armaOrder = c(0, 1),
+                                     include.mean = FALSE),
+                   variance.model = list(garchOrder = c(1, 1),
+                                         model = "eGARCH"),
+                   distribution.model = "std")
+spec2 = ugarchspec(mean.model = list(armaOrder = c(0, 0),
+                                     include.mean = FALSE),
+                   variance.model = list(garchOrder = c(0, 1),
+                                         model = "sGARCH"),
+                   fixed.pars = list(omega = 0),
+                   distribution.model = "std")
+dcc.spec = dccspec(uspec = multispec(c(spec1, spec2)),
+                   dccOrder = c(1, 1), distribution = "mvt") # "mvnorm" # "mvt" # "mvlaplace"
+(dcc.fit = dccfit(dcc.spec, data = d1lnserie, solver.control = list(tol = 1e-12),
+                  fit.control = list(scale = FALSE, stationarity = TRUE), model = "DCC",
+                  solver = "solnp",
+                  VAR = TRUE))
+```
+
+```{r results = 'asis'}
+coefdcc = as.data.frame(dcc.fit@mfit[["matcoef"]])
+coefdcc = cbind(Coef = sub("\\]", ".",
+                           sub("\\].", "\\]",
+                               sub("\\[", "", rownames(coefdcc)))), coefdcc)
+print(xtable(coefdcc,
+             digits = 4, label = "tab:dcc",
+             caption = "DCC fitted coefficients."),
+             caption.placement = "top", comment = FALSE, include.rownames = FALSE)
+```
+
+\subsection{Correlation and news impact} \label{subsec:cornews}
+
+Figure \ref{fig:cov} shows both series have a conditional covariance which decay throughout time with focus at last quarter of 2017, but then it recovers the trend but with a kind of \textit{sinusoidal} behaviour. On the other hand, conditional correlations seem to hold it pattern throughout time but an outlier appears at the last quarter of 2018. Finally, such as Figure \ref{fig:cor} shows and we describe above, both series are correlated on an inverse way; news impact correlation surface increase when there are equal shocks in terms of direction (i.e. sign) in both series and decrease otherwise.
+
+```{r, fig.width = 10, fig.height = 7, fig.cap = "\\label{fig:cov}Conditional covariance and conditional correlation plot for CLP/USD and Copper log returns throughout time.", message=FALSE, warning=FALSE}
+# superficie de impacto a las noticias
+par(mfrow = c(2, 1), font = 2, font.lab = 4, font.axis = 2, las = 1)
+plot(x = horizon[-1], y = rcov(dcc.fit)[1,2,], type = "l", col = "black", 
+     main = "Conditional Covariance", xlab = "", 
+     ylab = "", yaxt='n')
+plot(x = horizon[-1], y = rcor(dcc.fit)[1,2,], type = "l", col = "black", 
+     main = "Conditional Correlation", xlab = "",
+     ylab = "", yaxt='n')
+```
+
+```{r, fig.width = 10, fig.height = 5, fig.cap = "\\label{fig:cor}News impact correlation surface and correlation throughout time.", message=FALSE, warning=FALSE}
+# superficie de impacto a las noticias
+par(mfrow = c(1, 2), font = 2, font.lab = 4, font.axis = 2, las = 1)
+# surfcov = nisurface(dcc.fit, type = "cov", plot = TRUE, plot.type = "contour")
+surfcor1 = nisurface(dcc.fit, type = "cor", plot = TRUE, plot.type = "contour")
+surfcor2 = nisurface(dcc.fit, type = "cor", plot = TRUE, plot.type = "surface")
+```
+
+\section{Conclusion} \label{sec:conclusion}
+
+We have already seen that CLP/USD stock exchange time series could be represented through a MA(1)-eGARCH(1, 1) t-student distributed model to fin some patterns in the unobserved volatility between 2015 and 2018, where we showed that there are many events which can affect the market. However, proposed model shows possitve news have greater impact than negative ones and it is capable to get the trend of the volatility but there are some valleys where it fails and hold the increasing/decreasing trend of the past observed values. Also, at the end of the analyzed time period this model gives us there were an increasing pattern in estimated volatility, specialy for last 30 days; and a simulation for next 100 days shows this pattern holds for a couple of days and then decrease until to the middle of this time period to increase back.
+
+On the other hand, estimated volatility could be well fitted using EWMA models on different parameters with special focus at $\lambda = 0.75$, which looks like to MA(1)-eGARCH(1, 1) t-student distributed estimated model in terms of pattern with a level shift. This is also observed by using historical volatility through smoothing moving average (SMA) considering different time periods, where if we consider 150 or 210 days we get a smooth curve throughout time.
+
+Following an useful approach for this models, we compute the Value-at-Risk at 95\% and 99\% of confidence level, these models show they overreact to risk since the fraction of sample where loss exceed VaR are far away (but are less) than significance levels, which implies the country would have more money tied up than necessary. Nonetheless, using 1-step-ahead forecasting with MA(1)-eGARCH(1, 1) t-student distributed model, we got a 95\%-VaR of `r var95`\% (maximum expected loss) for `r tail(horizon,1)+1`.
+
+Finally, we use the value of a pound of Copper time series from a DCC multivariate model, where both time series show they are correlated on an inverse way, and also there is a lagged effect between them. This model shows the impact on past shock do not affect to the correlation, but the correlation is really persistence, meanwhile news impact correlation surface increase when there are equal shocks in terms of direction (i.e. sign) in both series and decrease otherwise.
